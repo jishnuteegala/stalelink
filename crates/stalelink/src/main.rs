@@ -253,3 +253,22 @@ fn run(cli: Cli) -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confidence_level_maps_to_core() {
+        let cases = [
+            (ConfidenceLevel::DeadCertain, Confidence::DeadCertain),
+            (ConfidenceLevel::LikelyDead, Confidence::LikelyDead),
+            (ConfidenceLevel::AuthWalled, Confidence::AuthWalled),
+            (ConfidenceLevel::Outdated, Confidence::Outdated),
+            (ConfidenceLevel::Suspect, Confidence::Suspect),
+        ];
+        for (level, expected) in cases {
+            assert_eq!(Confidence::from(level), expected);
+        }
+    }
+}

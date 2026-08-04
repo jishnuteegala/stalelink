@@ -250,6 +250,47 @@ mod tests {
     }
 
     #[test]
+    fn optional_fields_serialize_as_explicit_null() {
+        let finding = Finding {
+            url: "https://a.example".into(),
+            resolved_url: None,
+            source: SourceRef {
+                path: PathBuf::from("a.md"),
+                format: DocFormat::Markdown,
+                location: Location::Text { line: 1, column: 1 },
+                byte_span: None,
+            },
+            verdict: Verdict {
+                confidence: Confidence::DeadCertain,
+                reason: Reason::HttpStatus(404),
+                evidence: vec![],
+                checked_at: Utc.with_ymd_and_hms(2026, 8, 4, 12, 0, 0).unwrap(),
+                tier: 1,
+            },
+            fix: None,
+        };
+        let json = serde_json::to_string(&finding).unwrap();
+        assert!(json.contains(r#""resolved_url":null"#));
+        assert!(json.contains(r#""byte_span":null"#));
+        assert!(json.contains(r#""fix":null"#));
+    }
+
+    #[test]
+    fn found_link_uses_snake_case_json() {
+        let link = FoundLink {
+            url: "https://a.example".into(),
+            source: SourceRef {
+                path: PathBuf::from("a.md"),
+                format: DocFormat::Markdown,
+                location: Location::Text { line: 1, column: 1 },
+                byte_span: None,
+            },
+        };
+        let expected = r#"{"url":"https://a.example","source":{"path":"a.md","format":"markdown","location":{"type":"text","line":1,"column":1},"byte_span":null}}"#;
+        assert_eq!(serde_json::to_string(&link).unwrap(), expected);
+    }
+
+    #[test]
     fn finding_round_trips_with_expected_json() {
         let finding = Finding {
             url: "https://old.example".into(),
