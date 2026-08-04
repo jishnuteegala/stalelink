@@ -1,0 +1,16 @@
+# stalelink
+
+> CLI that scans local documents (PDF, DOCX, XLSX, PPTX, Markdown, HTML, plain text) for dead and outdated hyperlinks. Uses the user's own browser authenticated state (profile cookies, or a real browser via CDP) so login-walled links are never falsely reported dead. Fully local: no telemetry, no data stored or tracked.
+
+Status: pre-release, under active development. First tagged release ships the complete local feature set.
+
+## Usage (planned surface)
+
+- `stalelink check <paths...>` - scan files/directories for dead, redirected, auth-walled, and outdated links; exit codes distinguish clean runs from findings.
+- `stalelink fix <paths...>` - preview link rewrites as a diff; `--write` applies in place; `--backup` / `--copy` for cautious modes.
+- Output formats: human table (default), `--json`, SARIF.
+- Config: `stalelink.toml` discovered upward from cwd; `STALELINK_*` env vars; precedence flags > env > config > defaults.
+
+## Docs
+
+- README.md: problem statement, install channels, license (MIT).
