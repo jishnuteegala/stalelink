@@ -174,6 +174,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn confidence_severity_ordering() {
+        use Confidence::*;
+        assert!(DeadCertain > LikelyDead);
+        assert!(LikelyDead > Outdated);
+        assert!(Outdated > AuthWalled);
+        assert!(AuthWalled > Suspect);
+    }
+
+    #[test]
     fn reason_confidence_mapping() {
         let cases = [
             (Reason::HttpStatus(404), Confidence::DeadCertain),

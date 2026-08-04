@@ -3,16 +3,30 @@ use predicates::prelude::*;
 
 #[test]
 fn help_lists_commands_and_examples() {
-    Command::cargo_bin("stalelink")
+    let output = Command::cargo_bin("stalelink")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("scan"))
-        .stdout(predicate::str::contains("fix"))
-        .stdout(predicate::str::contains("cache"))
-        .stdout(predicate::str::contains("completions"))
-        .stdout(predicate::str::contains("Examples:"));
+        .stdout(predicate::str::contains("Examples:"))
+        .get_output()
+        .clone();
+    let help = String::from_utf8(output.stdout).unwrap();
+    let commands = help.split("Commands:").nth(1).unwrap();
+    let commands = commands.split("Options:").next().unwrap();
+    for cmd in ["scan", "fix", "cache", "completions"] {
+        assert!(commands.contains(cmd), "Commands table missing {cmd}");
+    }
+}
+
+#[test]
+fn json_conflicts_with_format() {
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["scan", "--json", "--format", "sarif", "x.md"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]
@@ -37,6 +51,7 @@ fn bash_completions_are_generated() {
 
 #[test]
 fn scan_is_not_implemented_yet() {
+    // The path is never opened; scan short-circuits before any IO.
     let file = tempfile::NamedTempFile::new().unwrap();
     Command::cargo_bin("stalelink")
         .unwrap()
