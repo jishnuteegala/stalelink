@@ -46,7 +46,17 @@ fn bash_completions_are_generated() {
         .args(["completions", "bash"])
         .assert()
         .success()
-        .stdout(predicate::str::is_match("(?s).+stalelink").unwrap());
+        .stdout(predicate::str::contains("_stalelink()"));
+}
+
+#[test]
+fn backup_requires_write() {
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["fix", "--backup", "x.md"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--write"));
 }
 
 #[test]

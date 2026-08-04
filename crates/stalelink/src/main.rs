@@ -58,7 +58,7 @@ struct FixArgs {
     #[arg(long)]
     write: bool,
     /// With --write, keep the original as a .bak file
-    #[arg(long)]
+    #[arg(long, requires = "write")]
     backup: bool,
     /// Write fixed copies as *.fixed.* instead of in place
     #[arg(long, conflicts_with = "write")]

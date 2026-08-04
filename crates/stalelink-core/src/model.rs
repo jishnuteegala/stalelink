@@ -86,9 +86,9 @@ impl Confidence {
     }
 }
 
-/// Stable adjacent JSON tagging; for example, `HttpStatus(404)` is `{"kind":"http-status","status":404}`.
+/// Stable adjacent JSON tagging; for example, `HttpStatus(404)` is `{"kind":"http-status","detail":404}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "status", rename_all = "kebab-case")]
+#[serde(tag = "kind", content = "detail", rename_all = "kebab-case")]
 pub enum Reason {
     HttpStatus(u16),
     NetworkError(NetKind),
@@ -206,6 +206,18 @@ mod tests {
         for (reason, confidence) in cases {
             assert_eq!(reason.confidence(), confidence);
         }
+    }
+
+    #[test]
+    fn reason_uses_adjacent_tagging() {
+        assert_eq!(
+            serde_json::to_string(&Reason::HttpStatus(404)).unwrap(),
+            r#"{"kind":"http-status","detail":404}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reason::NetworkError(NetKind::Dns)).unwrap(),
+            r#"{"kind":"network-error","detail":"dns"}"#
+        );
     }
 
     #[test]
