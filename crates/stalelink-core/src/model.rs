@@ -269,10 +269,9 @@ mod tests {
             },
             fix: None,
         };
-        let json = serde_json::to_string(&finding).unwrap();
-        assert!(json.contains(r#""resolved_url":null"#));
-        assert!(json.contains(r#""byte_span":null"#));
-        assert!(json.contains(r#""fix":null"#));
+        let expected = r#"{"url":"https://a.example","resolved_url":null,"source":{"path":"a.md","format":"markdown","location":{"type":"text","line":1,"column":1},"byte_span":null},"verdict":{"confidence":"dead-certain","reason":{"kind":"http-status","detail":404},"evidence":[],"checked_at":"2026-08-04T12:00:00Z","tier":1},"fix":null}"#;
+        assert_eq!(serde_json::to_string(&finding).unwrap(), expected);
+        assert_eq!(serde_json::from_str::<Finding>(expected).unwrap(), finding);
     }
 
     #[test]

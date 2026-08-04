@@ -60,6 +60,16 @@ fn backup_requires_write() {
 }
 
 #[test]
+fn backup_conflicts_with_copy() {
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["fix", "--backup", "--copy", "x.md"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
 fn scan_is_not_implemented_yet() {
     // The path is never opened; scan short-circuits before any IO.
     let file = tempfile::NamedTempFile::new().unwrap();
