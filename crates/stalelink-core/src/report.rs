@@ -1,5 +1,7 @@
 use std::io::{self, Write};
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::{
     model::{Confidence, Finding, Location, Reason},
     scan::ScanReport,
@@ -32,10 +34,10 @@ impl<W: Write> ReportSink for TableSink<W> {
             })
             .collect();
         let headers = ["CONFIDENCE", "URL", "SOURCE", "REASON"];
-        let mut widths = headers.map(str::len);
+        let mut widths = headers.map(UnicodeWidthStr::width);
         for row in &rows {
             for (width, cell) in widths.iter_mut().zip(row) {
-                *width = (*width).max(cell.len());
+                *width = (*width).max(cell.width());
             }
         }
         write_row(&mut self.0, &headers.map(String::from), &widths)?;
@@ -46,17 +48,21 @@ impl<W: Write> ReportSink for TableSink<W> {
     }
 }
 fn write_row<W: Write>(writer: &mut W, row: &[String; 4], widths: &[usize; 4]) -> io::Result<()> {
+    // Pad by display width, not byte length, so multibyte cells stay aligned.
     writeln!(
         writer,
-        "{:<w0$}  {:<w1$}  {:<w2$}  {}",
+        "{}{}  {}{}  {}{}  {}",
         row[0],
+        pad(&row[0], widths[0]),
         row[1],
+        pad(&row[1], widths[1]),
         row[2],
+        pad(&row[2], widths[2]),
         row[3],
-        w0 = widths[0],
-        w1 = widths[1],
-        w2 = widths[2],
     )
+}
+fn pad(cell: &str, width: usize) -> String {
+    " ".repeat(width.saturating_sub(cell.width()))
 }
 fn confidence(value: Confidence) -> &'static str {
     match value {

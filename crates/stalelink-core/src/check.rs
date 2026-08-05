@@ -112,6 +112,16 @@ fn network_kind(error: &reqwest::Error) -> NetKind {
     if error.is_timeout() {
         return NetKind::Timeout;
     }
+    // Prefer a typed io::Error in the source chain: it distinguishes a genuine
+    // connection refusal from other connect-phase failures without relying on
+    // platform-specific message wording.
+    if let Some(io_error) = io_error_in_chain(error)
+        && io_error.kind() == std::io::ErrorKind::ConnectionRefused
+    {
+        return NetKind::ConnRefused;
+    }
+    // TLS and resolver failures are not surfaced as typed values by reqwest, so
+    // fall back to inspecting the lowercased error chain for their wording.
     let chain = error_chain(error);
     if chain.contains("certificate")
         || chain.contains("tls")
@@ -126,11 +136,20 @@ fn network_kind(error: &reqwest::Error) -> NetKind {
         || chain.contains("no such host")
     {
         NetKind::Dns
-    } else if error.is_connect() {
-        NetKind::ConnRefused
     } else {
         NetKind::Other
     }
+}
+fn io_error_in_chain(error: &reqwest::Error) -> Option<&std::io::Error> {
+    use std::error::Error as _;
+    let mut source: Option<&(dyn std::error::Error + 'static)> = error.source();
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return Some(io_error);
+        }
+        source = current.source();
+    }
+    None
 }
 fn error_chain(error: &reqwest::Error) -> String {
     let mut message = String::new();
