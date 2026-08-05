@@ -79,3 +79,20 @@ fn clean_scan_exits_zero_with_no_stdout() {
         .success()
         .stdout("");
 }
+
+#[test]
+fn unknown_toml_key_is_a_usage_error_with_suggestion() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[network]\ntimout = \"1s\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("note.txt"), "").unwrap();
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["scan", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("did you mean `network.timeout`"));
+}

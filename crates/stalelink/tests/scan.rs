@@ -288,3 +288,82 @@ async fn no_local_suppresses_local_and_contact_findings() {
         .stdout("")
         .stderr("");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_stats_record_a_repeat_scan_hit() {
+    let server = serve(&[("/missing", 404)]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        format!("{}/missing\n", server.uri()),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let mut command = Command::cargo_bin("stalelink").unwrap();
+        command.env("STALELINK_CACHE_DIR", cache.path()).args([
+            "scan",
+            "--retries",
+            "0",
+            directory.path().to_str().unwrap(),
+        ]);
+        tokio::task::block_in_place(|| command.assert()).code(1);
+    }
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .env("STALELINK_CACHE_DIR", cache.path())
+        .args(["cache", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hits: 1").and(predicate::str::contains("misses: 1")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn flags_override_environment_toml_and_defaults() {
+    let server = MockServer::start().await;
+    Mock::given(path("/slow"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(2)))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[network]\ntimeout = \"3s\"\nretries = 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        format!("{}/slow\n", server.uri()),
+    )
+    .unwrap();
+    let mut command = Command::cargo_bin("stalelink").unwrap();
+    command.env("STALELINK_NETWORK_TIMEOUT", "2s").args([
+        "scan",
+        "--timeout",
+        "1",
+        directory.path().to_str().unwrap(),
+    ]);
+    tokio::task::block_in_place(|| command.assert())
+        .code(1)
+        .stdout(predicate::str::contains("LIKELY-DEAD"));
+}
+
+#[test]
+fn cache_clear_removes_the_injected_database() {
+    let cache = tempfile::tempdir().unwrap();
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .env("STALELINK_CACHE_DIR", cache.path())
+        .args(["cache", "stats"])
+        .assert()
+        .success();
+    let database = cache.path().join("verdicts.sqlite3");
+    assert!(database.exists());
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .env("STALELINK_CACHE_DIR", cache.path())
+        .args(["cache", "clear"])
+        .assert()
+        .success();
+    assert!(!database.exists());
+}
