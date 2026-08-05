@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Read,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -13,7 +14,7 @@ use crate::{
     check::Checker,
     extract::{SourceDocument, extract},
     model::{Finding, FixOrigin, Fixability, FoundLink, SuggestedFix, Verdict},
-    walk::{WalkOptions, detect_format, walk},
+    walk::{WalkOptions, detect_format, extension_format, walk},
 };
 
 pub struct ScanInput {
@@ -123,6 +124,8 @@ fn suggested_fix(verdict: &Verdict) -> Option<SuggestedFix> {
         fixable: Fixability::Auto,
     })
 }
+const UNKNOWN_FILE_LIMIT: u64 = 2 * 1024 * 1024;
+
 fn collect_links(
     paths_input: &[PathBuf],
     walk_opts: &WalkOptions,
@@ -130,8 +133,12 @@ fn collect_links(
     let paths = walk(paths_input, walk_opts)?;
     let mut links = Vec::new();
     for path in &paths {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let format = detect_format(path).expect("walker filters formats");
+        let Some(bytes) = read_for_detection(path)? else {
+            continue;
+        };
+        let Some(format) = detect_format(path, &bytes) else {
+            continue;
+        };
         links.extend(
             extract(&SourceDocument {
                 path: path.clone(),
@@ -142,6 +149,33 @@ fn collect_links(
         );
     }
     Ok((paths, links))
+}
+
+fn read_for_detection(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut bytes = vec![0; 8 * 1024];
+    let read = file
+        .read(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    bytes.truncate(read);
+
+    let has_binary_magic = bytes.starts_with(b"%PDF-") || bytes.starts_with(b"PK\x03\x04");
+    // Unknown files have no user-declared format to preserve. Limit them before
+    // allocating their complete contents; known extensions and magic keep their
+    // full-read behavior so mis-extensioned supported documents still work.
+    if extension_format(path).is_none()
+        && !has_binary_magic
+        && file
+            .metadata()
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .len()
+            > UNKNOWN_FILE_LIMIT
+    {
+        return Ok(None);
+    }
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(bytes))
 }
 fn allowed(link: &FoundLink, input: &ScanInput) -> bool {
     if input
@@ -170,6 +204,7 @@ mod tests {
         model::{Confidence, Evidence, Reason, Verdict},
     };
     use chrono::Utc;
+    use std::io::Write;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -200,6 +235,62 @@ mod tests {
             let verdict = self.0.clone();
             Box::pin(async move { Some(verdict) })
         }
+    }
+
+    #[tokio::test]
+    async fn skips_unknown_text_like_binary_after_the_probe_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("real.txt"), "https://real.test/x").unwrap();
+        let mut binary = vec![b'a'; 8 * 1024];
+        binary.push(0xff);
+        std::fs::write(directory.path().join("unknown"), binary).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "https://real.test/x");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn skips_large_unknown_files_but_scans_large_known_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("large.unknown"),
+            vec![0; 3 * 1024 * 1024],
+        )
+        .unwrap();
+        let mut text = vec![b'a'; 3 * 1024 * 1024];
+        text.extend_from_slice(b" https://large-known.test/x");
+        std::fs::write(directory.path().join("large.txt"), text).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "https://large-known.test/x");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -311,5 +402,203 @@ mod tests {
             tier: 1,
         };
         assert!(suggested_fix(&no_fix).is_none());
+    }
+
+    #[tokio::test]
+    async fn mixed_corpus_scan_handles_all_document_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, contents) in [
+            ("one.md", "[x](https://mixed.test/markdown)"),
+            ("two.html", "<a href=\"https://mixed.test/html\">x</a>"),
+            ("three.txt", "https://mixed.test/text"),
+        ] {
+            std::fs::write(directory.path().join(name), contents).unwrap();
+        }
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:instrText>HYPERLINK &quot;https://mixed.test/docx&quot;</w:instrText></w:r></w:p></w:body></w:document>"#).unwrap();
+        let docx = zip.finish().unwrap().into_inner();
+        std::fs::write(directory.path().join("four.bin"), docx).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, xml) in [
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1"><f>HYPERLINK(&quot;https://mixed.test/xlsx&quot;)</f></c></row></sheetData></worksheet>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        std::fs::write(
+            directory.path().join("five.wrong"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, xml) in [
+            (
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" TargetMode="External" Target="https://mixed.test/pptx"/></Relationships>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        std::fs::write(
+            directory.path().join("six.pptx"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let stream = "BT /F1 12 Tf 72 720 Td (https://mixed.test/pdf) Tj ET\n";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0];
+        for (number, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", number + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        std::fs::write(directory.path().join("seven.txt"), pdf).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 2,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.files_scanned, 7);
+        assert_eq!(report.findings.len(), 7, "{:#?}", report.findings);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
+        let found = |url: &str, format, location| {
+            report.findings.iter().any(|finding| {
+                finding.url == url
+                    && finding.source.format == format
+                    && finding.source.location == location
+            })
+        };
+        assert!(found(
+            "https://mixed.test/markdown",
+            crate::model::DocFormat::Markdown,
+            crate::model::Location::Text { line: 1, column: 5 }
+        ));
+        assert!(found(
+            "https://mixed.test/html",
+            crate::model::DocFormat::Html,
+            crate::model::Location::Text {
+                line: 1,
+                column: 10
+            }
+        ));
+        assert!(found(
+            "https://mixed.test/text",
+            crate::model::DocFormat::Text,
+            crate::model::Location::Text { line: 1, column: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/docx",
+            crate::model::DocFormat::Docx,
+            crate::model::Location::Docx { paragraph: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/xlsx",
+            crate::model::DocFormat::Xlsx,
+            crate::model::Location::Xlsx {
+                sheet: "S".into(),
+                cell: "A1".into()
+            }
+        ));
+        assert!(found(
+            "https://mixed.test/pptx",
+            crate::model::DocFormat::Pptx,
+            crate::model::Location::Pptx { slide: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/pdf",
+            crate::model::DocFormat::Pdf,
+            crate::model::Location::Pdf {
+                page: 1,
+                annotation: None
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn skips_unknown_binary_files_but_scans_extensionless_text() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("plain"),
+            "https://extensionless.test/x",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("garbage"), [0, 0xff, 1]).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("unrelated.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"https://inside-zip.test/x").unwrap();
+        std::fs::write(
+            directory.path().join("archive"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
