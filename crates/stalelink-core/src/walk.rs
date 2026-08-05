@@ -45,11 +45,12 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Option<DocFormat> {
     }
 }
 
-// Unknown files are text only when their first 8 KiB is UTF-8 and mostly
-// printable. This admits extensionless prose without attempting binary data.
+// Unknown files are text only when all bytes are UTF-8 and the first 8 KiB is
+// mostly printable. This admits extensionless prose without routing a binary
+// with a text-like header into a later fatal text decode.
 fn text_like(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(8 * 1024)];
-    std::str::from_utf8(sample).is_ok()
+    std::str::from_utf8(bytes).is_ok()
         && sample
             .iter()
             .filter(|&&byte| byte == 0 || (byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))

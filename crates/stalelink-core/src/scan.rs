@@ -206,6 +206,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skips_unknown_text_like_binary_after_the_probe_prefix() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("real.txt"), "https://real.test/x").unwrap();
+        let mut binary = vec![b'a'; 8 * 1024];
+        binary.push(0xff);
+        std::fs::write(directory.path().join("unknown"), binary).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "https://real.test/x");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn deduplicates_checks_but_reports_each_occurrence() {
         let file = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
         std::fs::write(file.path(), "https://bad.test/x https://bad.test/x").unwrap();

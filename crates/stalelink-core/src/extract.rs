@@ -387,10 +387,12 @@ impl Extractor for PdfExtractor {
                 let Ok(action) = action.as_dict() else {
                     continue;
                 };
-                if action
+                if !action
                     .get(b"S")
                     .and_then(|object| pdf.dereference(object))
-                    .is_ok_and(|(_, object)| !matches!(object, lopdf::Object::Name(name) if name == b"URI"))
+                    .is_ok_and(
+                        |(_, object)| matches!(object, lopdf::Object::Name(name) if name == b"URI"),
+                    )
                 {
                     continue;
                 }
@@ -401,7 +403,9 @@ impl Extractor for PdfExtractor {
                     continue;
                 };
                 let Ok(uri) = uri.as_str() else { continue };
-                let uri = pdf_string(uri);
+                let Some(uri) = pdf_string(uri) else {
+                    continue;
+                };
                 if is_http(&uri) {
                     links.push(binary_link(
                         doc,
@@ -438,9 +442,9 @@ impl Extractor for PdfExtractor {
     }
 }
 
-// PDF strings use UTF-16BE when BOM-prefixed. PDFDocEncoding is mostly Latin-1;
-// preserving its byte values is a pragmatic fallback for URI ASCII and Latin text.
-fn pdf_string(bytes: &[u8]) -> String {
+// PDFDocEncoding's undefined bytes reject the entire string rather than silently
+// changing a URI. PDF strings use UTF-16BE when BOM-prefixed.
+fn pdf_string(bytes: &[u8]) -> Option<String> {
     if bytes.starts_with(&[0xfe, 0xff]) {
         String::from_utf16(
             &bytes[2..]
@@ -448,10 +452,57 @@ fn pdf_string(bytes: &[u8]) -> String {
                 .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
                 .collect::<Vec<_>>(),
         )
-        .unwrap_or_default()
+        .ok()
     } else {
-        bytes.iter().map(|&byte| char::from(byte)).collect()
+        bytes.iter().copied().map(pdf_doc_encoding).collect()
     }
+}
+
+fn pdf_doc_encoding(byte: u8) -> Option<char> {
+    Some(match byte {
+        0x18 => '\u{02d8}',
+        0x19 => '\u{02c7}',
+        0x1a => '\u{02c6}',
+        0x1b => '\u{02d9}',
+        0x1c => '\u{02dd}',
+        0x1d => '\u{02db}',
+        0x1e => '\u{02da}',
+        0x1f => '\u{02dc}',
+        0x7f | 0x9f => return None,
+        0x80 => '\u{2022}',
+        0x81 => '\u{2020}',
+        0x82 => '\u{2021}',
+        0x83 => '\u{2026}',
+        0x84 => '\u{2014}',
+        0x85 => '\u{2013}',
+        0x86 => '\u{0192}',
+        0x87 => '\u{2044}',
+        0x88 => '\u{2039}',
+        0x89 => '\u{203a}',
+        0x8a => '\u{2212}',
+        0x8b => '\u{2030}',
+        0x8c => '\u{201e}',
+        0x8d => '\u{201c}',
+        0x8e => '\u{201d}',
+        0x8f => '\u{2018}',
+        0x90 => '\u{2019}',
+        0x91 => '\u{201a}',
+        0x92 => '\u{2122}',
+        0x93 => '\u{fb01}',
+        0x94 => '\u{fb02}',
+        0x95 => '\u{0141}',
+        0x96 => '\u{0152}',
+        0x97 => '\u{0160}',
+        0x98 => '\u{0178}',
+        0x99 => '\u{017d}',
+        0x9a => '\u{0131}',
+        0x9b => '\u{0142}',
+        0x9c => '\u{0153}',
+        0x9d => '\u{0161}',
+        0x9e => '\u{017e}',
+        0xa0 => '\u{20ac}',
+        byte => char::from(byte),
+    })
 }
 
 const ZIP_MEMBER_LIMIT: u64 = 64 * 1024 * 1024;
@@ -460,21 +511,29 @@ fn zip_text(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     name: &str,
 ) -> Result<String, ExtractError> {
+    zip_text_with_limit(archive, name, ZIP_MEMBER_LIMIT)
+}
+
+fn zip_text_with_limit(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    name: &str,
+    limit: u64,
+) -> Result<String, ExtractError> {
     let file = archive
         .by_name(name)
         .map_err(|error| ExtractError(error.to_string()))?;
-    if file.size() > ZIP_MEMBER_LIMIT {
+    if file.size() > limit {
         return Err(ExtractError(format!(
-            "{name}: uncompressed member exceeds {ZIP_MEMBER_LIMIT} byte limit"
+            "{name}: uncompressed member exceeds {limit} byte limit"
         )));
     }
     let mut bytes = Vec::with_capacity(file.size() as usize);
-    file.take(ZIP_MEMBER_LIMIT + 1)
+    file.take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| ExtractError(error.to_string()))?;
-    if bytes.len() as u64 > ZIP_MEMBER_LIMIT {
+    if bytes.len() as u64 > limit {
         return Err(ExtractError(format!(
-            "{name}: uncompressed member exceeds {ZIP_MEMBER_LIMIT} byte limit"
+            "{name}: uncompressed member exceeds {limit} byte limit"
         )));
     }
     String::from_utf8(bytes).map_err(|error| ExtractError(format!("{name}: {error}")))
@@ -500,7 +559,11 @@ fn attributes(event: &quick_xml::events::BytesStart<'_>) -> HashMap<String, Stri
         .collect()
 }
 
-fn relationships(xml: &str, external_only: bool) -> HashMap<String, String> {
+fn relationships(
+    part: &str,
+    xml: &str,
+    external_only: bool,
+) -> Result<HashMap<String, String>, ExtractError> {
     let mut reader = Reader::from_str(xml);
     let mut relationships = HashMap::new();
     loop {
@@ -508,7 +571,21 @@ fn relationships(xml: &str, external_only: bool) -> HashMap<String, String> {
             Ok(XmlEvent::Empty(event)) | Ok(XmlEvent::Start(event))
                 if event.name().as_ref() == b"Relationship" =>
             {
-                let attributes = attributes(&event);
+                let attributes = event
+                    .attributes()
+                    .map(|attribute| {
+                        let attribute =
+                            attribute.map_err(|error| ExtractError(format!("{part}: {error}")))?;
+                        let key = std::str::from_utf8(attribute.key.as_ref())
+                            .map_err(|error| ExtractError(format!("{part}: {error}")))?
+                            .to_owned();
+                        let value = attribute
+                            .unescape_value()
+                            .map_err(|error| ExtractError(format!("{part}: {error}")))?
+                            .into_owned();
+                        Ok((key, value))
+                    })
+                    .collect::<Result<HashMap<_, _>, ExtractError>>()?;
                 if (!external_only
                     || attributes
                         .get("TargetMode")
@@ -520,11 +597,12 @@ fn relationships(xml: &str, external_only: bool) -> HashMap<String, String> {
                     relationships.insert(id.clone(), target.clone());
                 }
             }
-            Ok(XmlEvent::Eof) | Err(_) => break,
+            Ok(XmlEvent::Eof) => break,
+            Err(error) => return Err(ExtractError(format!("{part}: {error}"))),
             _ => {}
         }
     }
-    relationships
+    Ok(relationships)
 }
 
 fn attribute<'a>(attributes: &'a HashMap<String, String>, suffix: &str) -> Option<&'a str> {
@@ -550,21 +628,28 @@ fn resolved_name(
     event: &quick_xml::events::BytesStart<'_>,
     namespace: &[u8],
     local: &[u8],
-    legacy_prefix: &[u8],
+    legacy_namespace: &[u8],
 ) -> bool {
-    (matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == namespace)
-        || matches!(resolved, ResolveResult::Unbound))
-        && event.local_name().as_ref() == local
-        || event.name().as_ref()
-            == if legacy_prefix.is_empty() {
-                local.to_vec()
-            } else {
-                [legacy_prefix, b":", local].concat()
-            }
+    match resolved {
+        ResolveResult::Bound(uri) => {
+            // Existing lightweight fixtures use the prefix itself as a stand-in
+            // namespace. Keep that narrow compatibility form, never a raw-name
+            // fallback, so an explicitly unrelated binding remains rejected.
+            (uri.as_ref() == namespace || uri.as_ref() == legacy_namespace)
+                && event.local_name().as_ref() == local
+        }
+        ResolveResult::Unbound => event.local_name().as_ref() == local,
+        ResolveResult::Unknown(prefix) => {
+            prefix.as_slice() == legacy_namespace && event.local_name().as_ref() == local
+        }
+    }
 }
 
 const WORD_NS: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const PRESENTATION_NS: &[u8] = b"http://schemas.openxmlformats.org/presentationml/2006/main";
+const DRAWING_NS: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/main";
+const RELATIONSHIPS_NS: &[u8] =
+    b"http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 fn relationship_part(part: &str) -> String {
     let (directory, name) = part.rsplit_once('/').unwrap_or(("", part));
@@ -613,13 +698,15 @@ fn extract_docx(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
 ) -> Result<Vec<FoundLink>, ExtractError> {
     let relations = optional_zip_text(archive, "word/_rels/document.xml.rels")?
-        .map(|xml| relationships(&xml, true))
+        .map(|xml| relationships("word/_rels/document.xml.rels", &xml, true))
+        .transpose()?
         .unwrap_or_default();
-    let document = zip_text(archive, "word/document.xml")?.replace("&quot;", "\"");
+    let document = zip_text(archive, "word/document.xml")?;
     let mut reader = NsReader::from_str(&document);
     let mut links = Vec::new();
     let mut paragraph = 0;
     let mut field: Option<(u32, String)> = None;
+    let mut instruction_text: Option<(u32, String)> = None;
     loop {
         match reader.read_resolved_event() {
             Ok((resolved, XmlEvent::Start(event))) | Ok((resolved, XmlEvent::Empty(event))) => {
@@ -652,34 +739,62 @@ fn extract_docx(
                 {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
                 }
+                if resolved_name(&resolved, &event, WORD_NS, b"instrText", b"w") {
+                    instruction_text = Some((paragraph, String::new()));
+                }
             }
             Ok((_, XmlEvent::Text(event))) => {
                 let text = event
                     .xml_content()
-                    .map_err(|error| ExtractError(error.to_string()))?;
+                    .map_err(|error| ExtractError(error.to_string()))?
+                    .replace("&quot;", "\"");
                 if let Some((_, instruction)) = &mut field {
                     instruction.push_str(&text);
+                } else if let Some((_, instruction)) = &mut instruction_text {
+                    instruction.push_str(&text);
                 } else if let Some(url) = link_from_field(&text) {
+                    links.push(binary_link(doc, url, Location::Docx { paragraph }));
+                }
+            }
+            Ok((_, XmlEvent::CData(event))) => {
+                let text = event
+                    .decode()
+                    .map_err(|error| ExtractError(error.to_string()))?
+                    .replace("&quot;", "\"");
+                if let Some((_, instruction)) = &mut field {
+                    instruction.push_str(&text);
+                } else if let Some((_, instruction)) = &mut instruction_text {
+                    instruction.push_str(&text);
+                } else if let Some(url) = link_from_field(&text) {
+                    links.push(binary_link(doc, url, Location::Docx { paragraph }));
+                }
+            }
+            Ok((_, XmlEvent::GeneralRef(event))) => {
+                let reference = event
+                    .decode()
+                    .map_err(|error| ExtractError(error.to_string()))?;
+                let reference = if reference == "quot" { "\"" } else { "&" };
+                if let Some((_, instruction)) = &mut field {
+                    instruction.push_str(reference);
+                } else if let Some((_, instruction)) = &mut instruction_text {
+                    instruction.push_str(reference);
+                }
+            }
+            Ok((resolved, XmlEvent::End(event)))
+                if (matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == WORD_NS || uri.as_ref() == b"w")
+                    || matches!(resolved, ResolveResult::Unbound)
+                    || matches!(&resolved, ResolveResult::Unknown(prefix) if prefix.as_slice() == b"w"))
+                    && event.local_name().as_ref() == b"instrText" =>
+            {
+                if let Some((paragraph, instruction)) = instruction_text.take()
+                    && let Some(url) = link_from_field(&instruction)
+                {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
                 }
             }
             Ok((_, XmlEvent::Eof)) => break,
             Err(error) => return Err(ExtractError(error.to_string())),
             _ => {}
-        }
-    }
-    // Some producers leave field text entity-escaped; scan the raw instruction as
-    // a final fallback while preserving the paragraph containing the field.
-    for (offset, _) in document.match_indices("HYPERLINK") {
-        let paragraph = document[..offset].matches("<w:p").count() as u32
-            + document[..offset].matches("<x:p").count() as u32;
-        let instruction = document[offset..].replace("&quot;", "\"");
-        if let Some(url) = link_from_field(&instruction)
-            && !links
-                .iter()
-                .any(|link| link.url == url && link.source.location == Location::Docx { paragraph })
-        {
-            links.push(binary_link(doc, url, Location::Docx { paragraph }));
         }
     }
     Ok(links)
@@ -690,8 +805,10 @@ fn extract_xlsx(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
 ) -> Result<Vec<FoundLink>, ExtractError> {
     let workbook = zip_text(archive, "xl/workbook.xml")?;
-    let workbook_relations =
-        relationships(&zip_text(archive, "xl/_rels/workbook.xml.rels")?, false);
+    let workbook_relations = optional_zip_text(archive, "xl/_rels/workbook.xml.rels")?
+        .map(|xml| relationships("xl/_rels/workbook.xml.rels", &xml, false))
+        .transpose()?
+        .unwrap_or_default();
     let mut reader = Reader::from_str(&workbook);
     let mut sheets = Vec::new();
     loop {
@@ -715,7 +832,8 @@ fn extract_xlsx(
     for (sheet, path) in sheets {
         let rel_path = relationship_part(&path);
         let relations = optional_zip_text(archive, &rel_path)?
-            .map(|xml| relationships(&xml, true))
+            .map(|xml| relationships(&rel_path, &xml, true))
+            .transpose()?
             .unwrap_or_default();
         let xml = zip_text(archive, &path)?.replace("&quot;", "\"");
         let mut reader = Reader::from_str(&xml);
@@ -765,7 +883,8 @@ fn extract_xlsx(
                 Ok(XmlEvent::Text(event)) if formula => {
                     let text = event
                         .xml_content()
-                        .map_err(|error| ExtractError(error.to_string()))?;
+                        .map_err(|error| ExtractError(error.to_string()))?
+                        .replace("&quot;", "\"");
                     if let Some(url) = link_from_field(&text) {
                         links.push(binary_link(
                             doc,
@@ -792,7 +911,8 @@ fn extract_pptx(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
 ) -> Result<Vec<FoundLink>, ExtractError> {
     let presentation_relations = optional_zip_text(archive, "ppt/_rels/presentation.xml.rels")?
-        .map(|xml| relationships(&xml, false))
+        .map(|xml| relationships("ppt/_rels/presentation.xml.rels", &xml, false))
+        .transpose()?
         .unwrap_or_default();
     let mut slides = Vec::new();
     if let Some(presentation) = optional_zip_text(archive, "ppt/presentation.xml")? {
@@ -832,27 +952,42 @@ fn extract_pptx(
     for (index, path) in slides.iter().enumerate() {
         let rel_path = relationship_part(path);
         let relations = optional_zip_text(archive, &rel_path)?
-            .map(|xml| relationships(&xml, true))
+            .map(|xml| relationships(&rel_path, &xml, true))
+            .transpose()?
             .unwrap_or_default();
         let slide = zip_text(archive, path)?;
-        let mut reader = Reader::from_str(&slide);
+        let mut reader = NsReader::from_str(&slide);
         loop {
-            match reader.read_event() {
-                Ok(XmlEvent::Empty(event)) | Ok(XmlEvent::Start(event)) => {
-                    let attributes = attributes(&event);
-                    if let Some(id) = attribute(&attributes, ":id")
-                        && let Some(url) = relations.get(id)
+            match reader.read_resolved_event() {
+                Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event))) => {
+                    if resolved_name(&resolved, &event, DRAWING_NS, b"hlinkClick", b"a")
+                        || resolved_name(&resolved, &event, DRAWING_NS, b"hlinkHover", b"a")
                     {
-                        links.push(binary_link(
-                            doc,
-                            url,
-                            Location::Pptx {
-                                slide: index as u32 + 1,
-                            },
-                        ));
+                        let id = event.attributes().find_map(|attribute| {
+                            let attribute = attribute.ok()?;
+                            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+                            let is_relationship_id = (matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == RELATIONSHIPS_NS || uri.as_ref() == b"r")
+                                || matches!(namespace, ResolveResult::Unbound)
+                                || matches!(namespace, ResolveResult::Unknown(prefix) if prefix.as_slice() == b"r"))
+                                && local.as_ref() == b"id";
+                            is_relationship_id
+                                .then(|| attribute.unescape_value().ok().map(|value| value.into_owned()))
+                                .flatten()
+                        });
+                        if let Some(id) = id.as_deref()
+                            && let Some(url) = relations.get(id)
+                        {
+                            links.push(binary_link(
+                                doc,
+                                url,
+                                Location::Pptx {
+                                    slide: index as u32 + 1,
+                                },
+                            ));
+                        }
                     }
                 }
-                Ok(XmlEvent::Eof) => break,
+                Ok((_, XmlEvent::Eof)) => break,
                 Err(error) => return Err(ExtractError(error.to_string())),
                 _ => {}
             }
@@ -895,6 +1030,31 @@ mod tests {
             "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /A << /S /URI /URI (https://annotation.test/x) >> >>".to_owned(),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
         ];
+        let mut output = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0];
+        for (number, object) in objects.iter().enumerate() {
+            offsets.push(output.len());
+            output
+                .extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", number + 1).as_bytes());
+        }
+        let xref = output.len();
+        output.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets.iter().skip(1) {
+            output.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        output.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        output
+    }
+
+    fn pdf_with_objects(objects: &[String]) -> Vec<u8> {
         let mut output = b"%PDF-1.4\n".to_vec();
         let mut offsets = vec![0];
         for (number, object) in objects.iter().enumerate() {
@@ -1275,6 +1435,134 @@ mod tests {
     }
 
     #[test]
+    fn pdf_extracts_indirect_and_encoded_uri_actions_but_not_other_actions() {
+        let bytes = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Annots [4 0 R 5 0 R 6 0 R] >>".into(),
+            "<< /Type /Annot /Subtype /Link /A 7 0 R >>".into(),
+            "<< /Type /Annot /Subtype /Link /A << /S /URI /URI 8 0 R >> >>".into(),
+            "<< /Type /Annot /Subtype /Link /A << /S /GoTo /URI (https://ignored.test/x) >> >>".into(),
+            "<< /S /URI /URI (https://indirect.test/x) >>".into(),
+            "<FEFF00680074007400700073003A002F002F00750074006600310036002E0074006500730074002F0078>".into(),
+        ]);
+        let links = extract(&binary_document(DocFormat::Pdf, bytes)).unwrap();
+        assert!(
+            links
+                .iter()
+                .any(|link| link.url == "https://indirect.test/x")
+        );
+        assert!(links.iter().any(|link| link.url == "https://utf16.test/x"));
+        assert!(
+            !links
+                .iter()
+                .any(|link| link.url == "https://ignored.test/x")
+        );
+    }
+
+    #[test]
+    fn pdf_doc_encoding_uses_pdf_mapping_and_rejects_undefined_bytes() {
+        assert_eq!(
+            pdf_string(b"https://example.test/a\x85b"),
+            Some("https://example.test/a\u{2013}b".into())
+        );
+        assert_eq!(pdf_string(b"https://example.test/\x7f"), None);
+    }
+
+    #[test]
+    fn pdf_annotation_survives_page_text_extraction_failure() {
+        let bytes = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Contents 4 0 R /Annots [5 0 R] >>".into(),
+            "<< /Length 8 >>\nstream\nBT Tf ET\nendstream".into(),
+            "<< /Type /Annot /Subtype /Link /A << /S /URI /URI (https://annotation-survives.test/x) >> >>".into(),
+        ]);
+        let pdf = lopdf::Document::load_mem(&bytes).unwrap();
+        assert!(pdf.extract_text(&[1]).is_err());
+        let links = extract(&binary_document(DocFormat::Pdf, bytes)).unwrap();
+        assert!(
+            links
+                .iter()
+                .any(|link| link.url == "https://annotation-survives.test/x")
+        );
+    }
+
+    #[test]
+    fn zip_member_limit_accepts_boundary_and_rejects_overage() {
+        let bytes = zip(&[("part.xml", "12345678")]);
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes.as_slice())).unwrap();
+        assert_eq!(
+            zip_text_with_limit(&mut archive, "part.xml", 8).unwrap(),
+            "12345678"
+        );
+        let error = zip_text_with_limit(&mut archive, "part.xml", 7)
+            .unwrap_err()
+            .0;
+        assert!(error.contains("part.xml"));
+        assert!(error.contains("7 byte limit"));
+    }
+
+    #[test]
+    fn relationships_parse_external_targets() {
+        let relations = relationships(
+            "part.rels",
+            r#"<Relationships><Relationship Id="r1" TargetMode="External" Target="https://example.test/x"/></Relationships>"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            relations.get("r1"),
+            Some(&"https://example.test/x".to_owned())
+        );
+    }
+
+    #[test]
+    fn malformed_present_relationship_parts_fail_with_part_name() {
+        let docx = zip(&[
+            ("word/document.xml", "<document/>"),
+            (
+                "word/_rels/document.xml.rels",
+                "<Relationships><Relationship",
+            ),
+        ]);
+        let xlsx = zip(&[
+            (
+                "xl/workbook.xml",
+                "<workbook><sheets><sheet name=\"S\" r:id=\"r1\"/></sheets></workbook>",
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                "<Relationships><Relationship Id=\"r1\" Target=\"worksheets/sheet1.xml\"/></Relationships>",
+            ),
+            ("xl/worksheets/sheet1.xml", "<worksheet/>"),
+            (
+                "xl/worksheets/_rels/sheet1.xml.rels",
+                "<Relationships><Relationship",
+            ),
+        ]);
+        let pptx = zip(&[
+            ("ppt/slides/slide1.xml", "<p:sld xmlns:p=\"p\"/>"),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                "<Relationships><Relationship",
+            ),
+        ]);
+        for (format, bytes, part) in [
+            (DocFormat::Docx, docx, "word/_rels/document.xml.rels"),
+            (DocFormat::Xlsx, xlsx, "xl/worksheets/_rels/sheet1.xml.rels"),
+            (DocFormat::Pptx, pptx, "ppt/slides/_rels/slide1.xml.rels"),
+        ] {
+            assert!(
+                extract(&binary_document(format, bytes))
+                    .unwrap_err()
+                    .0
+                    .contains(part)
+            );
+        }
+    }
+
+    #[test]
     fn docx_links_are_anchored_to_their_paragraphs() {
         let bytes = zip(&[
             (
@@ -1311,6 +1599,37 @@ mod tests {
             && link.source.location == Location::Docx { paragraph: 1 }));
         assert!(links.iter().any(|link| link.url == "https://simple.test/x"
             && link.source.location == Location::Docx { paragraph: 2 }));
+    }
+
+    #[test]
+    fn docx_namespace_parsing_accepts_alternate_prefix_once_and_rejects_foreign_prefix() {
+        let alternate = zip(&[(
+            "word/document.xml",
+            r#"<z:document xmlns:z="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><z:body><z:p><z:fldSimple z:instr="HYPERLINK &quot;https://alternate.test/x&quot;"/></z:p></z:body></z:document>"#,
+        )]);
+        let links = extract(&binary_document(DocFormat::Docx, alternate)).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].source.location, Location::Docx { paragraph: 1 });
+
+        let foreign = zip(&[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="foreign"><w:body><w:p><w:fldSimple w:instr="HYPERLINK &quot;https://foreign.test/x&quot;"/></w:p></w:body></w:document>"#,
+        )]);
+        assert!(
+            extract(&binary_document(DocFormat::Docx, foreign))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn xlsx_allows_workbook_without_relationships() {
+        let bytes = zip(&[("xl/workbook.xml", "<workbook><sheets/></workbook>")]);
+        assert!(
+            extract(&binary_document(DocFormat::Xlsx, bytes))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1416,5 +1735,22 @@ mod tests {
         let links = extract(&binary_document(DocFormat::Pptx, pptx)).unwrap();
         assert_eq!(links[0].source.location, Location::Pptx { slide: 1 });
         assert_eq!(links[0].url, "https://slide.test/x");
+    }
+
+    #[test]
+    fn pptx_ignores_foreign_id_attributes_and_accepts_drawingml_hyperlinks() {
+        let bytes = zip(&[
+            (
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:f="foreign"><f:thing r:id="bad"/><a:hlinkClick r:id="good"/></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                r#"<Relationships><Relationship Id="bad" TargetMode="External" Target="https://foreign.test/x"/><Relationship Id="good" TargetMode="External" Target="https://real.test/x"/></Relationships>"#,
+            ),
+        ]);
+        let links = extract(&binary_document(DocFormat::Pptx, bytes)).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://real.test/x");
     }
 }
