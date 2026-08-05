@@ -131,7 +131,9 @@ fn collect_links(
     let mut links = Vec::new();
     for path in &paths {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let format = detect_format(path, &bytes);
+        let Some(format) = detect_format(path, &bytes) else {
+            continue;
+        };
         links.extend(
             extract(&SourceDocument {
                 path: path.clone(),
@@ -331,12 +333,6 @@ mod tests {
         )
         .unwrap();
         zip.write_all(br#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:instrText>HYPERLINK &quot;https://mixed.test/docx&quot;</w:instrText></w:r></w:p></w:body></w:document>"#).unwrap();
-        zip.start_file(
-            "word/_rels/document.xml.rels",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        zip.write_all(b"<Relationships/>").unwrap();
         let docx = zip.finish().unwrap().into_inner();
         std::fs::write(directory.path().join("four.bin"), docx).unwrap();
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -429,5 +425,92 @@ mod tests {
         assert_eq!(report.files_scanned, 7);
         assert_eq!(report.findings.len(), 7, "{:#?}", report.findings);
         assert_eq!(calls.load(Ordering::SeqCst), 7);
+        let found = |url: &str, format, location| {
+            report.findings.iter().any(|finding| {
+                finding.url == url
+                    && finding.source.format == format
+                    && finding.source.location == location
+            })
+        };
+        assert!(found(
+            "https://mixed.test/markdown",
+            crate::model::DocFormat::Markdown,
+            crate::model::Location::Text { line: 1, column: 5 }
+        ));
+        assert!(found(
+            "https://mixed.test/html",
+            crate::model::DocFormat::Html,
+            crate::model::Location::Text {
+                line: 1,
+                column: 10
+            }
+        ));
+        assert!(found(
+            "https://mixed.test/text",
+            crate::model::DocFormat::Text,
+            crate::model::Location::Text { line: 1, column: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/docx",
+            crate::model::DocFormat::Docx,
+            crate::model::Location::Docx { paragraph: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/xlsx",
+            crate::model::DocFormat::Xlsx,
+            crate::model::Location::Xlsx {
+                sheet: "S".into(),
+                cell: "A1".into()
+            }
+        ));
+        assert!(found(
+            "https://mixed.test/pptx",
+            crate::model::DocFormat::Pptx,
+            crate::model::Location::Pptx { slide: 1 }
+        ));
+        assert!(found(
+            "https://mixed.test/pdf",
+            crate::model::DocFormat::Pdf,
+            crate::model::Location::Pdf {
+                page: 1,
+                annotation: None
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn skips_unknown_binary_files_but_scans_extensionless_text() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("plain"),
+            "https://extensionless.test/x",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("garbage"), [0, 0xff, 1]).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("unrelated.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"https://inside-zip.test/x").unwrap();
+        std::fs::write(
+            directory.path().join("archive"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

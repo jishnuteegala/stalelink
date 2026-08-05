@@ -10,21 +10,21 @@ pub struct WalkOptions {
     pub exclude: Vec<String>,
 }
 
-pub fn detect_format(path: &Path, bytes: &[u8]) -> DocFormat {
+pub fn detect_format(path: &Path, bytes: &[u8]) -> Option<DocFormat> {
     if bytes.starts_with(b"%PDF-") {
-        return DocFormat::Pdf;
+        return Some(DocFormat::Pdf);
     }
     if bytes.starts_with(b"PK\x03\x04")
         && let Ok(archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes))
     {
         if archive.file_names().any(|name| name.starts_with("word/")) {
-            return DocFormat::Docx;
+            return Some(DocFormat::Docx);
         }
         if archive.file_names().any(|name| name.starts_with("xl/")) {
-            return DocFormat::Xlsx;
+            return Some(DocFormat::Xlsx);
         }
         if archive.file_names().any(|name| name.starts_with("ppt/")) {
-            return DocFormat::Pptx;
+            return Some(DocFormat::Pptx);
         }
     }
     match path
@@ -40,9 +40,22 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> DocFormat {
         Some("docx") => Some(DocFormat::Docx),
         Some("xlsx") => Some(DocFormat::Xlsx),
         Some("pptx") => Some(DocFormat::Pptx),
-        _ => Some(DocFormat::Text),
+        _ if text_like(bytes) => Some(DocFormat::Text),
+        _ => None,
     }
-    .unwrap_or(DocFormat::Text)
+}
+
+// Unknown files are text only when their first 8 KiB is UTF-8 and mostly
+// printable. This admits extensionless prose without attempting binary data.
+fn text_like(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(8 * 1024)];
+    std::str::from_utf8(sample).is_ok()
+        && sample
+            .iter()
+            .filter(|&&byte| byte == 0 || (byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t')))
+            .count()
+            * 100
+            <= sample.len().max(1)
 }
 
 pub fn walk(paths: &[PathBuf], options: &WalkOptions) -> Result<Vec<PathBuf>, String> {
@@ -84,7 +97,7 @@ mod tests {
     fn magic_bytes_override_extensions_and_extensionless_files() {
         assert_eq!(
             detect_format(Path::new("wrong.txt"), b"%PDF-1.4"),
-            DocFormat::Pdf
+            Some(DocFormat::Pdf)
         );
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         zip.start_file(
@@ -95,7 +108,7 @@ mod tests {
         let bytes = zip.finish().unwrap().into_inner();
         assert_eq!(
             detect_format(Path::new("no-extension"), &bytes),
-            DocFormat::Docx
+            Some(DocFormat::Docx)
         );
     }
 }
