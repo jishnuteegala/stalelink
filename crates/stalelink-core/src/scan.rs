@@ -398,21 +398,13 @@ fn slug(heading: &str) -> String {
     for character in heading.chars().flat_map(char::to_lowercase) {
         if character.is_whitespace() {
             slug.push('-');
-        } else if (character == '-' || character == '_')
-            || (!character.is_ascii_punctuation() && !is_combining_mark(character))
-        {
+        } else if character.is_alphanumeric() || character == '-' || character == '_' {
             slug.push(character);
         }
     }
     slug
 }
 
-fn is_combining_mark(character: char) -> bool {
-    matches!(
-        character,
-        '\u{300}'..='\u{36f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}'
-    )
-}
 const UNKNOWN_FILE_LIMIT: u64 = 2 * 1024 * 1024;
 
 fn collect_links(
@@ -625,9 +617,34 @@ mod tests {
                 "repeated---whitespace",
                 "",
                 "-1",
-                "rust-\u{1f980}-caf\u{e9}",
+                "rust--caf\u{e9}",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn local_links_resolve_github_style_unicode_heading_slugs() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("target.md"),
+            "# Rust \u{1f980} Crab\n# Apostrophe\u{2019}s trimmed\n# Caf\u{e9} menu\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[emoji](target.md#rust--crab) [apostrophe](target.md#apostrophes-trimmed) [accented](target.md#caf\u{e9}-menu)",
+        )
+        .unwrap();
+
+        let report = scan(
+            input(directory.path()),
+            &Fake(Arc::new(AtomicUsize::new(0))),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.findings.is_empty(), "{:#?}", report.findings);
     }
 
     #[tokio::test]
