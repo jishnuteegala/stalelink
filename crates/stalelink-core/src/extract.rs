@@ -81,8 +81,8 @@ fn valid_span(text: &str, span: &Range<usize>) -> bool {
 
 // html5tokenizer 0.5.2 leaves `value_span.end` unset (0) for unquoted attribute
 // values that run to the tag close, producing an inverted range. The start
-// offset is reliable, so recompute the end by scanning to the first
-// whitespace, `>`, or `/` when the raw span is unusable.
+// offset is reliable, so recompute the end by scanning to the first whitespace
+// or `>` when the raw span is unusable.
 fn repair_span(
     text: &str,
     span: Range<usize>,
@@ -106,38 +106,98 @@ fn repair_span(
 
 // Locate the raw destination of a Markdown inline link inside its event span.
 // pulldown gives the whole `[label](dest)` span and a *decoded* destination, so
-// we find the `](` that opens the destination and walk to the matching close,
-// preferring the raw (possibly escaped) spelling over the decoded one.
+// we find the `](` that opens the destination and parse the CommonMark
+// destination grammar: either an angle-bracket `<...>` form or a bare form of
+// balanced parentheses that ends at the first unescaped whitespace or the
+// closing `)`. The decoded raw slice must equal `dest_url` to confirm the match.
 fn inline_dest_span(text: &str, event: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
     let slice = text.get(event.clone())?;
     let open = slice.rfind("](")? + 2 + event.start;
     let rest = text.get(open..event.end)?;
-    // Destination runs up to the first unescaped whitespace (title) or the
-    // closing paren; a backslash-escaped paren/space is part of the URL.
+    let span = if rest.starts_with('<') {
+        angle_dest(open, rest)
+    } else {
+        bare_dest(open, rest)
+    }?;
+    // Confirm this really is the destination: unescaping the raw slice (minus
+    // any angle brackets) must yield the decoded semantic URL.
+    let raw = text.get(span.clone())?;
+    let inner = raw.strip_prefix('<').and_then(|s| s.strip_suffix('>'));
+    if unescape_dest(inner.unwrap_or(raw)) == dest_url {
+        Some(span)
+    } else {
+        None
+    }
+}
+// `<...>` destination: spans from `<` to the first unescaped `>`.
+fn angle_dest(open: usize, rest: &str) -> Option<Range<usize>> {
     let mut escaped = false;
-    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '>' && i > 0 {
+            return Some(open..open + i + 1);
+        }
+    }
+    None
+}
+// Bare destination: balanced parentheses, ending at the first unescaped
+// whitespace (before an optional title) or the closing `)` at depth zero.
+fn bare_dest(open: usize, rest: &str) -> Option<Range<usize>> {
+    let mut escaped = false;
+    let mut depth: i32 = 0;
     for (i, c) in rest.char_indices() {
         if escaped {
             escaped = false;
             continue;
         }
-        if c == '\\' {
-            escaped = true;
-        } else if c == ')' || c.is_whitespace() {
-            end = Some(open + i);
-            break;
+        match c {
+            '\\' => escaped = true,
+            '(' => depth += 1,
+            ')' if depth == 0 => return Some(open..open + i),
+            ')' => depth -= 1,
+            c if c.is_whitespace() => return Some(open..open + i),
+            _ => {}
         }
     }
-    let end = end?;
-    let raw = text.get(open..end)?;
-    // Confirm this really is the destination: unescaping must yield dest_url.
-    if unescape_dest(raw) == dest_url {
-        Some(open..end)
-    } else {
-        None
-    }
+    None
 }
 
+// Reference links carry no destination in the event; the URL lives at a
+// `[label]: url` definition. Locate that definition's destination so we do not
+// mis-attribute the span to an identical bare URL earlier in the document.
+fn reference_def_span(text: &str, dest_url: &str) -> Option<Range<usize>> {
+    for (line_start, line) in line_offsets(text) {
+        let Some(colon) = line.find("]:") else {
+            continue;
+        };
+        let after = &line[colon + 2..];
+        let trimmed = after.trim_start();
+        let dest_start = line_start + colon + 2 + (after.len() - trimmed.len());
+        let rest = &text[dest_start..];
+        let span = if rest.starts_with('<') {
+            angle_dest(dest_start, rest)
+        } else {
+            bare_dest(dest_start, rest)
+        }?;
+        let raw = text.get(span.clone())?;
+        let inner = raw.strip_prefix('<').and_then(|s| s.strip_suffix('>'));
+        if unescape_dest(inner.unwrap_or(raw)) == dest_url {
+            return Some(span);
+        }
+    }
+    None
+}
+fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    text.lines().map(move |line| {
+        let start = offset;
+        offset += line.len() + 1;
+        (start, line)
+    })
+}
 // Markdown backslash-unescapes ASCII punctuation in link destinations.
 fn unescape_dest(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
@@ -185,6 +245,7 @@ impl Extractor for MarkdownExtractor {
                     // in the document, and dedupe uses that share it. Never
                     // substitute the whole link event as a destination span.
                     let dest_span = inline_dest_span(text, &span, &dest_url)
+                        .or_else(|| reference_def_span(text, &dest_url))
                         .or_else(|| locate(text, &dest_url, &(0..text.len())));
                     if let Some(dest_span) = dest_span {
                         links.push(link(doc, &dest_url, dest_span));
@@ -412,6 +473,48 @@ mod tests {
             &doc.bytes[span.start as usize..span.end as usize],
             br"https://example.test/a\(b\)"
         );
+    }
+    #[test]
+    fn markdown_balanced_parens_destination_has_exact_span() {
+        let text = "[x](https://example.test/a(b)c)";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a(b)c");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/a(b)c"
+        );
+    }
+    #[test]
+    fn markdown_angle_bracket_destination_has_exact_span() {
+        let text = "[x](<https://example.test/a b>)";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a b");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"<https://example.test/a b>"
+        );
+    }
+    #[test]
+    fn markdown_reference_span_targets_the_definition_not_earlier_bare_url() {
+        let text =
+            "see https://example.test/x here\n\nuse [it][r]\n\n[r]: https://example.test/x\n";
+        let doc = document(DocFormat::Markdown, text);
+        let links = extract(&doc).unwrap();
+        let reference = links
+            .iter()
+            .find(|found| {
+                found
+                    .source
+                    .byte_span
+                    .as_ref()
+                    .is_some_and(|span| span.start as usize > text.find("[r]:").unwrap())
+            })
+            .expect("reference link resolved to its definition");
+        assert_eq!(reference.url, "https://example.test/x");
     }
     #[test]
     fn html_unquoted_mixed_case_attributes_have_valid_spans() {

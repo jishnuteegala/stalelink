@@ -121,11 +121,10 @@ fn zero_concurrency_is_a_usage_error() {
         .stderr(predicate::str::contains("at least 1"));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn head_method_not_allowed_falls_back_to_get() {
+async fn head_falls_back_to_get(head_status: u16) {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))
-        .respond_with(ResponseTemplate::new(405))
+        .respond_with(ResponseTemplate::new(head_status))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -135,6 +134,31 @@ async fn head_method_not_allowed_falls_back_to_get() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("note.txt"), format!("{}/x\n", server.uri())).unwrap();
     scan(dir.path(), &[]).code(0).stdout("");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_method_not_allowed_falls_back_to_get() {
+    head_falls_back_to_get(405).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_forbidden_falls_back_to_get() {
+    head_falls_back_to_get(403).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn head_not_implemented_falls_back_to_get() {
+    head_falls_back_to_get(501).await;
+}
+
+#[test]
+fn bad_exclude_url_regex_is_usage_error_even_with_missing_path() {
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["scan", "--exclude-url", "[", "does-not-exist.md"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid --exclude-url"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

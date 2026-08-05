@@ -287,6 +287,21 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         eprintln!("error: --max-concurrency and --per-host must be at least 1");
         return ExitCode::from(USAGE);
     }
+    // Validate argument values (usage errors) before any path or environment
+    // check, so a bad regex reports exit 2 regardless of whether a path exists.
+    let exclude_urls = match args
+        .common
+        .exclude_url
+        .iter()
+        .map(|value| Regex::new(value))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(regexes) => regexes,
+        Err(error) => {
+            eprintln!("error: invalid --exclude-url regex: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
     if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
         eprintln!("error: not implemented yet");
         return ExitCode::from(ENVIRONMENT);
@@ -314,19 +329,6 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             eprintln!("warning: unsupported file format: {}", path.display());
         }
     }
-    let exclude_urls = match args
-        .common
-        .exclude_url
-        .iter()
-        .map(|value| Regex::new(value))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(regexes) => regexes,
-        Err(error) => {
-            eprintln!("error: invalid --exclude-url regex: {error}");
-            return ExitCode::from(USAGE);
-        }
-    };
     let checker = match HttpChecker::new(
         Duration::from_secs(args.common.network.timeout),
         args.common.network.retries,
