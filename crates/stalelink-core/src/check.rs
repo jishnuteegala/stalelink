@@ -15,6 +15,7 @@ use crate::model::{Evidence, NetKind, Reason, Verdict};
 const SOFT_404_SIMILARITY: f64 = 0.9;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_REDIRECTS: usize = 10;
+const RETRY_WAIT_TIME: Duration = Duration::from_secs(1);
 const FAR_PAST: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 2);
 const STALENESS_PHRASES: &[&str] = &[
     "this page is deprecated",
@@ -31,6 +32,7 @@ pub trait Checker: Send + Sync {
 pub struct HttpChecker {
     raw: reqwest::Client,
     retries: u8,
+    retry_wait_time: Duration,
     per_host: usize,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
@@ -40,25 +42,31 @@ impl HttpChecker {
         retries: u8,
         per_host: usize,
         user_agent: String,
-    ) -> Result<Self, lychee_lib::ErrorKind> {
+    ) -> Result<Self, reqwest::Error> {
+        Self::with_retry_wait_time(timeout, retries, per_host, user_agent, RETRY_WAIT_TIME)
+    }
+    fn with_retry_wait_time(
+        timeout: Duration,
+        retries: u8,
+        per_host: usize,
+        user_agent: String,
+        retry_wait_time: Duration,
+    ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             raw: reqwest::Client::builder()
                 .timeout(timeout)
                 .user_agent(user_agent)
                 .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(lychee_lib::ErrorKind::NetworkRequest)?,
+                .build()?,
             retries,
+            retry_wait_time,
             per_host,
             hosts: Mutex::new(HashMap::new()),
         })
     }
     async fn host_permit(&self, url: &Url) -> tokio::sync::OwnedSemaphorePermit {
-        let host = match (url.host_str(), url.port()) {
-            (Some(host), Some(port)) => format!("{host}:{port}"),
-            (Some(host), None) => host.to_owned(),
-            (None, _) => String::new(),
-        };
+        let host = host_key(url);
+        // The checker is scan-scoped, so retaining host entries avoids churn during a scan.
         let semaphore = self
             .hosts
             .lock()
@@ -75,16 +83,17 @@ impl HttpChecker {
         &self,
         method: reqwest::Method,
         url: Url,
-    ) -> Result<reqwest::StatusCode, reqwest::Error> {
+    ) -> Result<StatusResult, reqwest::Error> {
         let mut current = url;
         let mut visited = HashSet::from([current.clone()]);
-        for _ in 0..MAX_REDIRECTS {
+        let mut redirects = 0;
+        loop {
             let (response, permit) = self.request(method.clone(), &current).await?;
             let status = response.status();
             if !status.is_redirection() {
                 drop(response);
                 drop(permit);
-                return Ok(status);
+                return Ok(StatusResult::Terminal(status));
             }
             let next = response
                 .headers()
@@ -94,21 +103,24 @@ impl HttpChecker {
             drop(response);
             drop(permit);
             let Some(next) = next else {
-                return Ok(status);
+                return Ok(StatusResult::Terminal(status));
             };
+            redirects += 1;
+            if redirects > MAX_REDIRECTS {
+                return Ok(StatusResult::Unterminated("redirect limit exhausted"));
+            }
             if !visited.insert(next.clone()) {
-                return Ok(reqwest::StatusCode::LOOP_DETECTED);
+                return Ok(StatusResult::Unterminated("redirect loop detected"));
             }
             current = next;
         }
-        Ok(reqwest::StatusCode::LOOP_DETECTED)
     }
     async fn raw_get(&self, url: Url) -> Result<RawResponse, reqwest::Error> {
         let origin = url.clone();
         let mut current = url;
         let mut redirects = Vec::new();
         let mut visited = HashSet::from([current.clone()]);
-        for _ in 0..MAX_REDIRECTS {
+        loop {
             let (response, permit) = self.request(reqwest::Method::GET, &current).await?;
             if !response.status().is_redirection() {
                 let headers = response.headers().clone();
@@ -140,6 +152,11 @@ impl HttpChecker {
                 ));
             };
             redirects.push((response.status(), next.clone()));
+            if redirects.len() > MAX_REDIRECTS {
+                return Ok(unterminated_response(
+                    response, permit, current, origin, redirects,
+                ));
+            }
             if !visited.insert(next.clone()) {
                 return Ok(unterminated_response(
                     response, permit, current, origin, redirects,
@@ -149,15 +166,6 @@ impl HttpChecker {
             drop(permit);
             current = next;
         }
-        Ok(RawResponse {
-            status: reqwest::StatusCode::LOOP_DETECTED,
-            origin,
-            url: current,
-            redirects,
-            headers: reqwest::header::HeaderMap::new(),
-            body: String::new(),
-            terminated: false,
-        })
     }
     async fn request(
         &self,
@@ -176,12 +184,15 @@ impl HttpChecker {
                                     | reqwest::StatusCode::TOO_MANY_REQUESTS
                             )) =>
                 {
+                    let delay = retry_delay(&response, attempt, self.retry_wait_time);
                     drop(response);
                     drop(permit);
+                    tokio::time::sleep(delay).await;
                 }
                 Ok(response) => return Ok((response, permit)),
                 Err(error) if attempt < self.retries && retryable_request_error(&error) => {
                     drop(permit);
+                    tokio::time::sleep(retry_backoff(attempt, self.retry_wait_time)).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -302,10 +313,19 @@ impl Checker for HttpChecker {
         })
     }
 }
-fn outcome(status: Result<reqwest::StatusCode, reqwest::Error>) -> Option<Verdict> {
+fn outcome(status: Result<StatusResult, reqwest::Error>) -> Option<Verdict> {
     let (reason, detail) = match status {
-        Ok(status) if status.is_success() => return None,
-        Ok(status) => (Reason::HttpStatus(status.as_u16()), status.to_string()),
+        Ok(StatusResult::Terminal(status)) if status.is_success() => return None,
+        Ok(StatusResult::Terminal(status)) => {
+            (Reason::HttpStatus(status.as_u16()), status.to_string())
+        }
+        Ok(StatusResult::Unterminated(detail)) => {
+            return Some(verdict(
+                Reason::NetworkError(NetKind::Other),
+                "redirect-traversal".into(),
+                detail.into(),
+            ));
+        }
         Err(error) => (
             Reason::NetworkError(network_kind(&error)),
             error.to_string(),
@@ -357,14 +377,58 @@ fn network_kind(error: &reqwest::Error) -> NetKind {
 fn retryable_request_error(error: &reqwest::Error) -> bool {
     error.is_timeout()
         || (error.is_request()
-            && io_error_in_chain(error).is_some_and(|io_error| {
-                matches!(
-                    io_error.kind(),
-                    std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::TimedOut
-                )
-            }))
+            && (hyper_error_in_chain(error)
+                .is_some_and(|error| error.is_incomplete_message() || error.is_canceled())
+                || io_error_in_chain(error).is_some_and(retryable_io_error)))
+}
+fn retryable_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::TimedOut
+    )
+}
+fn hyper_error_in_chain(error: &reqwest::Error) -> Option<&hyper::Error> {
+    use std::error::Error as _;
+    let mut source: Option<&(dyn std::error::Error + 'static)> = error.source();
+    while let Some(current) = source {
+        if let Some(hyper_error) = current.downcast_ref::<hyper::Error>() {
+            return Some(hyper_error);
+        }
+        source = current.source();
+    }
+    None
+}
+fn retry_delay(response: &reqwest::Response, attempt: u8, base: Duration) -> Duration {
+    let backoff = retry_backoff(attempt, base);
+    if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return backoff;
+    }
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .map_or(backoff, |retry_after| retry_after.max(backoff))
+}
+fn retry_backoff(attempt: u8, base: Duration) -> Duration {
+    base.checked_mul(1_u32.checked_shl(u32::from(attempt)).unwrap_or(u32::MAX))
+        .unwrap_or(Duration::MAX)
+}
+fn host_key(url: &Url) -> String {
+    match (url.host_str(), url.port_or_known_default()) {
+        (Some(host), Some(port)) => format!("{}:{port}", host.to_ascii_lowercase()),
+        (Some(host), None) => host.to_ascii_lowercase(),
+        (None, _) => String::new(),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StatusResult {
+    Terminal(reqwest::StatusCode),
+    Unterminated(&'static str),
 }
 fn io_error_in_chain(error: &reqwest::Error) -> Option<&std::io::Error> {
     use std::error::Error as _;
@@ -533,10 +597,16 @@ fn normalized_words(value: &str) -> std::collections::BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use wiremock::{
-        Mock, MockServer, ResponseTemplate,
+        Mock, MockServer, Respond, ResponseTemplate,
         matchers::{method, path, path_regex},
     };
 
@@ -545,6 +615,17 @@ mod tests {
 
     async fn checker() -> HttpChecker {
         HttpChecker::new(Duration::from_secs(2), 0, 2, "stalelink-test".into()).unwrap()
+    }
+
+    async fn retrying_checker(retries: u8) -> HttpChecker {
+        HttpChecker::with_retry_wait_time(
+            Duration::from_secs(2),
+            retries,
+            2,
+            "stalelink-test".into(),
+            Duration::from_millis(1),
+        )
+        .unwrap()
     }
 
     async fn mount(server: &MockServer, route: &str, response: ResponseTemplate) {
@@ -759,9 +840,27 @@ mod tests {
 
     #[tokio::test]
     async fn base_redirects_share_the_destination_host_limit() {
+        struct ActiveResponder {
+            active: Arc<AtomicUsize>,
+            max_active: Arc<AtomicUsize>,
+        }
+        impl Respond for ActiveResponder {
+            fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_active.fetch_max(active, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                self.active.fetch_sub(1, Ordering::SeqCst);
+                ResponseTemplate::new(200)
+            }
+        }
         let destination = MockServer::start().await;
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
         Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)))
+            .respond_with(ActiveResponder {
+                active,
+                max_active: max_active.clone(),
+            })
             .mount(&destination)
             .await;
         let first = MockServer::start().await;
@@ -777,20 +876,29 @@ mod tests {
         }
         let checker =
             HttpChecker::new(Duration::from_secs(2), 0, 1, "stalelink-test".into()).unwrap();
-        let started = Instant::now();
-        let (first_status, second_status) = tokio::join!(
-            checker.status(
-                reqwest::Method::HEAD,
-                format!("{}/start", first.uri()).parse().unwrap()
-            ),
-            checker.status(
-                reqwest::Method::HEAD,
-                format!("{}/start", second.uri()).parse().unwrap()
-            ),
+        let (first_status, second_status) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(
+                checker.status(
+                    reqwest::Method::HEAD,
+                    format!("{}/start", first.uri()).parse().unwrap()
+                ),
+                checker.status(
+                    reqwest::Method::HEAD,
+                    format!("{}/start", second.uri()).parse().unwrap()
+                ),
+            )
+        })
+        .await
+        .expect("redirect checks should not hang");
+        assert_eq!(
+            first_status.unwrap(),
+            StatusResult::Terminal(reqwest::StatusCode::OK)
         );
-        assert_eq!(first_status.unwrap(), reqwest::StatusCode::OK);
-        assert_eq!(second_status.unwrap(), reqwest::StatusCode::OK);
-        assert!(started.elapsed() >= Duration::from_millis(180));
+        assert_eq!(
+            second_status.unwrap(),
+            StatusResult::Terminal(reqwest::StatusCode::OK)
+        );
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -808,16 +916,11 @@ mod tests {
             ResponseTemplate::new(301).insert_header("location", "/login"),
         )
         .await;
-        mount(
-            &server,
-            "/missing",
-            ResponseTemplate::new(301).insert_header("location", "/login"),
-        )
-        .await;
+        mount(&server, "/missing", ResponseTemplate::new(301)).await;
         mount(
             &server,
             "/invalid",
-            ResponseTemplate::new(301).insert_header("location", "/login?returnUrl=x"),
+            ResponseTemplate::new(301).insert_header("location", "http://[::1"),
         )
         .await;
         mount(
@@ -977,5 +1080,159 @@ mod tests {
             "/v2/archive/v9/item"
         );
         assert!(version_upgrade(&"https://example.test/v4294967295/".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn host_key_normalizes_case_and_default_ports() {
+        assert_eq!(
+            host_key(&"http://EXAMPLE.test/".parse().unwrap()),
+            host_key(&"http://example.test:80/".parse().unwrap())
+        );
+        assert_eq!(
+            host_key(&"https://example.test/".parse().unwrap()),
+            host_key(&"https://example.test:443/".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn retry_classes_match_transient_io_errors() {
+        assert!(retryable_io_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset
+        )));
+        assert!(retryable_io_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionAborted
+        )));
+        assert!(retryable_io_error(&std::io::Error::from(
+            std::io::ErrorKind::TimedOut
+        )));
+        assert!(!retryable_io_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionRefused
+        )));
+    }
+
+    #[test]
+    fn retry_backoff_doubles_from_its_base() {
+        let base = Duration::from_millis(3);
+        assert_eq!(retry_backoff(0, base), base);
+        assert_eq!(retry_backoff(1, base), Duration::from_millis(6));
+        assert_eq!(retry_backoff(2, base), Duration::from_millis(12));
+    }
+
+    #[test]
+    fn retry_after_extends_a_rate_limit_backoff() {
+        let response = reqwest::Response::from(
+            hyper::http::Response::builder()
+                .status(reqwest::StatusCode::TOO_MANY_REQUESTS)
+                .header(reqwest::header::RETRY_AFTER, "7")
+                .body(reqwest::Body::default())
+                .unwrap(),
+        );
+        assert_eq!(
+            retry_delay(&response, 0, Duration::from_secs(1)),
+            Duration::from_secs(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_transient_responses_and_returns_the_final_response() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_responder = attempts.clone();
+        Mock::given(method("HEAD"))
+            .respond_with(move |_: &wiremock::Request| {
+                let attempt = attempts_for_responder.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(if attempt < 2 { 503 } else { 200 })
+            })
+            .mount(&server)
+            .await;
+        let result = retrying_checker(2)
+            .await
+            .status(reqwest::Method::HEAD, server.uri().parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result, StatusResult::Terminal(reqwest::StatusCode::OK));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_non_transient_responses() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let result = retrying_checker(2)
+            .await
+            .status(reqwest::Method::HEAD, server.uri().parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            StatusResult::Terminal(reqwest::StatusCode::NOT_FOUND)
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_limits_count_followed_redirects_in_both_traversals() {
+        for redirects in [9, 10, 11] {
+            let server = MockServer::start().await;
+            for index in 0..redirects {
+                mount(
+                    &server,
+                    &format!("/{index}"),
+                    ResponseTemplate::new(302).insert_header("location", format!("/{}", index + 1)),
+                )
+                .await;
+            }
+            mount(
+                &server,
+                &format!("/{redirects}"),
+                ResponseTemplate::new(200),
+            )
+            .await;
+            let url: Url = format!("{}/0", server.uri()).parse().unwrap();
+            let status = checker()
+                .await
+                .status(reqwest::Method::HEAD, url.clone())
+                .await
+                .unwrap();
+            let raw = checker().await.raw_get(url.clone()).await.unwrap();
+            if redirects <= MAX_REDIRECTS {
+                assert_eq!(status, StatusResult::Terminal(reqwest::StatusCode::OK));
+                assert!(raw.terminated);
+            } else {
+                assert_eq!(
+                    status,
+                    StatusResult::Unterminated("redirect limit exhausted")
+                );
+                assert!(!raw.terminated);
+                let verdict = checker().await.check(url).await.unwrap();
+                assert_eq!(verdict.reason, Reason::NetworkError(NetKind::Other));
+                assert_eq!(verdict.evidence[0].kind, "redirect-traversal");
+                assert_eq!(verdict.evidence[0].detail, "redirect limit exhausted");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_loops_are_unterminated_in_both_traversals() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/loop",
+            ResponseTemplate::new(302).insert_header("location", "/loop"),
+        )
+        .await;
+        let url: Url = format!("{}/loop", server.uri()).parse().unwrap();
+        assert_eq!(
+            checker()
+                .await
+                .status(reqwest::Method::HEAD, url.clone())
+                .await
+                .unwrap(),
+            StatusResult::Unterminated("redirect loop detected")
+        );
+        assert!(!checker().await.raw_get(url).await.unwrap().terminated);
     }
 }

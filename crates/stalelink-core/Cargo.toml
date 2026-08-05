@@ -17,8 +17,8 @@ regex.workspace = true
 tokio.workspace = true
 url.workspace = true
 unicode-width.workspace = true
-lychee-lib.workspace = true
 reqwest.workspace = true
+hyper.workspace = true
 futures.workspace = true
 
 [dev-dependencies]
