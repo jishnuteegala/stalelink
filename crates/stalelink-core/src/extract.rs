@@ -245,6 +245,10 @@ impl Extractor for MarkdownExtractor {
             .iter()
             .map(|(label, def)| (UniCase::new(label.to_owned()), def.span.clone()))
             .collect();
+        // Every reference definition is a suppression range so a URL-shaped
+        // title (or the destination) is never rediscovered by linkify, whether
+        // or not the definition's own destination is HTTP.
+        link_ranges.extend(ref_defs.values().cloned());
         for (event, span) in Parser::new(text).into_offset_iter() {
             let (Event::Start(Tag::Link {
                 link_type,
@@ -269,31 +273,25 @@ impl Extractor for MarkdownExtractor {
             // will fetch. We only reconstruct the *raw* byte span for in-place
             // fixing; when an exotic form defeats that, fall back to the event
             // (or definition) span so the link is never dropped.
-            let (dest_span, suppress) = match link_type {
-                LinkType::Inline => (inline_dest_span(text, &span).unwrap_or(span.clone()), None),
+            let dest_span = match link_type {
+                LinkType::Inline => inline_dest_span(text, &span).unwrap_or(span.clone()),
                 LinkType::Autolink | LinkType::Email => {
                     // `<url>` autolink: the raw span is the inner bytes.
-                    let inner = span.start + 1..span.end.saturating_sub(1);
-                    (inner, None)
+                    span.start + 1..span.end.saturating_sub(1)
                 }
                 LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut => {
                     match ref_defs.get(&UniCase::new(id.to_string())) {
-                        Some(def_span) => (
-                            dest_in_definition(text, def_span).unwrap_or(def_span.clone()),
-                            Some(def_span.clone()),
-                        ),
-                        None => (span.clone(), None),
+                        Some(def_span) => {
+                            dest_in_definition(text, def_span).unwrap_or(def_span.clone())
+                        }
+                        None => span.clone(),
                     }
                 }
-                _ => (span.clone(), None),
+                _ => span.clone(),
             };
-            // Suppress bare-URL rediscovery over the destination and, for a
-            // reference, its whole definition (so a URL-shaped title is not
-            // reported as a second link).
+            // Suppress bare-URL rediscovery over the destination (definition
+            // spans are already suppressed above).
             link_ranges.push(dest_span.clone());
-            if let Some(def_span) = suppress {
-                link_ranges.push(def_span);
-            }
             links.push(link(doc, &dest_url, dest_span));
         }
         // Bare URLs in prose are not link events; linkify them, but skip any
@@ -659,6 +657,16 @@ mod tests {
         let links = extract(&doc).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://example.test/x");
+    }
+    #[test]
+    fn markdown_title_url_suppressed_even_with_non_http_destination() {
+        let text = "[a][x]\n\n[x]: /relative \"https://title.test/t\"\n";
+        let doc = document(DocFormat::Markdown, text);
+        let links = extract(&doc).unwrap();
+        assert!(
+            links.is_empty(),
+            "non-http destination and its title must not be reported, got {links:?}"
+        );
     }
     #[test]
     fn html_unquoted_mixed_case_attributes_have_valid_spans() {
