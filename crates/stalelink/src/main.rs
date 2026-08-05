@@ -301,12 +301,23 @@ fn run(cli: Cli) -> ExitCode {
 }
 
 fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
-    let first_path = args
-        .common
-        .paths
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let mut paths = args.common.paths;
+    if args.common.stdin {
+        let mut input = String::new();
+        if let Err(error) = io::stdin().read_to_string(&mut input) {
+            eprintln!("error: reading stdin: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+        paths.extend(
+            input
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    // A scan uses the nearest config above its first input path; stdin paths are
+    // appended after positional paths, so stdin-only scans use their first line.
+    let first_path = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
     let network = &args.common.network;
     let mut settings = match config::resolve(&first_path) {
         Ok(settings) => settings,
@@ -379,20 +390,6 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         eprintln!("error: not implemented yet");
         return ExitCode::from(ENVIRONMENT);
     }
-    let mut paths = args.common.paths;
-    if args.common.stdin {
-        let mut input = String::new();
-        if let Err(error) = io::stdin().read_to_string(&mut input) {
-            eprintln!("error: reading stdin: {error}");
-            return ExitCode::from(ENVIRONMENT);
-        }
-        paths.extend(
-            input
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .map(PathBuf::from),
-        );
-    }
     for path in &paths {
         if !path.exists() {
             eprintln!("error: path does not exist: {}", path.display());
@@ -419,7 +416,12 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         paths,
         walk: WalkOptions {
             include: args.common.include,
-            exclude: args.common.exclude,
+            exclude: args
+                .common
+                .exclude
+                .into_iter()
+                .chain(settings.ignore.exclude)
+                .collect(),
         },
         max_concurrency: settings.network.max_concurrency as usize,
         exclude_urls,
@@ -456,11 +458,16 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         };
         let checker =
             cache::CachingChecker::new(checker, cache, settings.cache.ttl, 1, network.refresh);
-        if show_progress {
+        let result = if show_progress {
             runtime.block_on(scan(input, &checker, &StderrProgress))
         } else {
             runtime.block_on(scan(input, &checker, &NoProgress))
+        };
+        if let Some(error) = checker.error() {
+            eprintln!("error: {error}");
+            return ExitCode::from(ENVIRONMENT);
         }
+        result
     };
     if show_progress {
         eprintln!();
@@ -505,7 +512,15 @@ fn cache_path(configured: Option<&std::path::Path>) -> PathBuf {
 }
 
 fn run_cache(command: CacheCommand) -> ExitCode {
-    let path = cache_path(None);
+    // Cache commands are project-scoped from the current working directory.
+    let settings = match config::resolve(std::path::Path::new(".")) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
+    let path = cache_path(settings.cache.dir.as_deref());
     match command {
         CacheCommand::Clear => match cache::VerdictCache::clear(&path) {
             Ok(()) => ExitCode::from(CLEAN),

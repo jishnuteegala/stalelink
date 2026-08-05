@@ -169,7 +169,24 @@ pub fn resolve(scan_path: &Path) -> Result<Settings, String> {
     figment = figment.merge(Env::prefixed("STALELINK_").split("_").lowercase(true));
     let mut settings: Settings = figment.extract().map_err(|error| error.to_string())?;
     apply_env(&mut settings)?;
+    validate(&settings)?;
     Ok(settings)
+}
+
+fn validate(settings: &Settings) -> Result<(), String> {
+    if !matches!(settings.auth.auth.as_str(), "off" | "cookies" | "browser") {
+        return Err(format!("invalid auth.auth value: {}", settings.auth.auth));
+    }
+    if !matches!(
+        settings.auth.browser.as_str(),
+        "auto" | "chrome" | "edge" | "brave" | "chromium" | "firefox"
+    ) {
+        return Err(format!(
+            "invalid auth.browser value: {}",
+            settings.auth.browser
+        ));
+    }
+    Ok(())
 }
 
 fn apply_env(settings: &mut Settings) -> Result<(), String> {
@@ -337,5 +354,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resolve(&nested).unwrap().network.retries, 7);
+    }
+
+    #[test]
+    fn discovery_uses_a_file_parent_and_the_first_scan_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let second = directory.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(first.join("stalelink.toml"), "[network]\nretries = 3\n").unwrap();
+        fs::write(second.join("stalelink.toml"), "[network]\nretries = 9\n").unwrap();
+        let file = first.join("note.txt");
+        fs::write(&file, "").unwrap();
+        assert_eq!(resolve(&file).unwrap().network.retries, 3);
+        assert_eq!(resolve(&first).unwrap().network.retries, 3);
     }
 }

@@ -21,7 +21,35 @@ Fully local and open source: no telemetry, no data stored or tracked by the CLI.
 
 Explicit Markdown destinations (including resolved reference links), HTML `href`/`src` attributes, and external PDF/OOXML targets may point to local files. Relative paths resolve from the containing document; absolute/root-relative paths resolve from the filesystem root. Query strings are ignored for filesystem lookup. Percent escapes in paths and fragments are decoded strictly before any filesystem lookup or anchor comparison; malformed escapes or invalid UTF-8 are syntax-invalid. Markdown headings use rendered text, lowercase slugs that retain Unicode letters and numbers plus hyphens and underscores, remove other characters, convert each whitespace character to a hyphen, and reserve GitHub-style document-wide duplicate suffixes (`-1`, `-2`). Markdown and HTML also recognize `id` on any element and `name` on `<a>` elements. Existing directories are valid fragmentless targets; links with directory fragments report that their anchors cannot be checked. Anchors in other existing formats are not inspected.
 
-`mailto:` requires a simple `local@domain.tld` shape. `tel:` requires at least one digit and permits only digits, `+`, `-`, parentheses, and spaces. Use `--no-local` to skip all local, mailto, and tel checks. Config-based local-link ignores are not yet implemented.
+`mailto:` requires a simple `local@domain.tld` shape. `tel:` requires at least one digit and permits only digits, `+`, `-`, parentheses, and spaces. Use `--no-local` or `[ignore] local-links = true` to skip all local, mailto, and tel checks.
+
+## Configuration and cache
+
+`stalelink` discovers the nearest `stalelink.toml` by walking upward from the first scan input. Positional paths come first; paths read through `--stdin` are appended, so an stdin-only scan uses its first non-empty line. Multi-path scans deliberately use the first path's configuration. `cache clear` and `cache stats` discover configuration upward from the current directory.
+
+Settings use `flags > environment > stalelink.toml > defaults` precedence. Environment names are `STALELINK_<SECTION>_<KEY>`, uppercased with hyphens changed to underscores: for example, `STALELINK_NETWORK_TIMEOUT=30s`, `STALELINK_CACHE_TTL=2h`, and `STALELINK_IGNORE_LOCAL_LINKS=true`.
+
+```toml
+[network]
+max-concurrency = 128 # per-host = 4, timeout = "20s", retries = 2, user-agent = optional string
+
+[cache]
+ttl = "24h"
+dir = ".stalelink-cache" # optional; stores verdicts.sqlite3 here
+
+[ignore]
+local-links = false
+exclude = ["generated/**"]
+exclude-url = ["https://example.test/noisy/.*"]
+exclude-domain = ["example.test"]
+
+[output]
+fail-on = "suspect"
+```
+
+TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`; CLI `--timeout` is seconds, while `--cache-ttl` uses humantime. `[auth] auth` accepts `off`, `cookies`, or `browser`; `[auth] browser` accepts `auto`, `chrome`, `edge`, `brave`, `chromium`, or `firefox`. These auth settings, plus `[fix] write`, `backup`, and `copy`, are validated placeholders until their respective functionality lands.
+
+The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to remove it.
 
 ## License
 

@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -97,9 +97,12 @@ impl VerdictCache {
         let entries = connection
             .query_row("SELECT COUNT(*) FROM verdicts", [], |row| row.get(0))
             .map_err(|error| error.to_string())?;
-        let size = fs::metadata(&self.path)
+        let size = ["", "-wal", "-shm"]
+            .iter()
+            .map(|suffix| fs::metadata(format!("{}{}", self.path.display(), suffix)))
+            .filter_map(Result::ok)
             .map(|metadata| metadata.len())
-            .unwrap_or(0);
+            .sum();
         Ok(CacheStats {
             hits,
             misses,
@@ -108,60 +111,95 @@ impl VerdictCache {
         })
     }
 
-    fn get(&self, url: &Url, ttl: Duration, current_cap: u8) -> Option<Option<Verdict>> {
+    fn get(
+        &self,
+        url: &Url,
+        ttl: Duration,
+        current_cap: u8,
+    ) -> Result<Option<Option<Verdict>>, String> {
         let key = normalised_url(url);
         let now = unix_seconds();
-        let connection = self.connection.lock().ok()?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "cache lock poisoned".to_owned())?;
         let row: Option<(Option<String>, i64, u8)> = connection
             .query_row(
                 "SELECT verdict_json, checked_at, tier FROM verdicts WHERE url = ?1",
-                [key],
+                [&key],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
-            .ok()?;
-        let result = row.and_then(|(json, checked_at, tier)| {
-            let age = now.saturating_sub(checked_at as u64);
-            if age > ttl.as_secs() {
-                return None;
+            .map_err(|error| format!("reading cache: {error}"))?;
+        let result = match row {
+            Some((Some(json), checked_at, tier)) => {
+                let age = now.saturating_sub(checked_at as u64);
+                if age > ttl.as_secs() {
+                    None
+                } else {
+                    match serde_json::from_str::<Verdict>(&json) {
+                        Ok(verdict) if reusable(&verdict, tier, current_cap) => Some(Some(verdict)),
+                        Ok(_) => None,
+                        Err(_) => {
+                            // A row from an older or interrupted writer is not reusable.
+                            connection
+                                .execute("DELETE FROM verdicts WHERE url = ?1", [&key])
+                                .map_err(|error| {
+                                    format!("removing malformed cache row: {error}")
+                                })?;
+                            None
+                        }
+                    }
+                }
             }
-            match json {
-                Some(json) => serde_json::from_str::<Verdict>(&json)
-                    .ok()
-                    .filter(|verdict| reusable(verdict, tier, current_cap))
-                    .map(Some),
-                None => Some(None),
+            Some((None, checked_at, _)) => {
+                let age = now.saturating_sub(checked_at as u64);
+                if age <= ttl.as_secs() {
+                    Some(None)
+                } else {
+                    None
+                }
             }
-        });
+            None => None,
+        };
         let column = if result.is_some() { "hits" } else { "misses" };
-        let _ = connection.execute(
-            &format!("UPDATE cache_stats SET {column} = {column} + 1 WHERE singleton = 1"),
-            [],
-        );
-        result
+        connection
+            .execute(
+                &format!("UPDATE cache_stats SET {column} = {column} + 1 WHERE singleton = 1"),
+                [],
+            )
+            .map_err(|error| format!("updating cache statistics: {error}"))?;
+        Ok(result)
     }
 
-    fn put(&self, url: &Url, verdict: &Option<Verdict>) {
+    fn put(&self, url: &Url, verdict: &Option<Verdict>) -> Result<(), String> {
         let json = verdict
             .as_ref()
-            .and_then(|verdict| serde_json::to_string(verdict).ok());
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| format!("serializing cache verdict: {error}"))?;
         let tier = verdict.as_ref().map_or(1, |verdict| verdict.tier);
-        if let Ok(connection) = self.connection.lock() {
-            let _ = connection.execute(
-                "INSERT INTO verdicts (url, verdict_json, checked_at, tier) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT(url) DO UPDATE SET verdict_json = excluded.verdict_json, checked_at = excluded.checked_at, tier = excluded.tier",
-                params![normalised_url(url), json, unix_seconds() as i64, tier],
-            );
-        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "cache lock poisoned".to_owned())?;
+        connection.execute(
+            "INSERT INTO verdicts (url, verdict_json, checked_at, tier) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(url) DO UPDATE SET verdict_json = excluded.verdict_json, checked_at = excluded.checked_at, tier = excluded.tier",
+            params![normalised_url(url), json, unix_seconds() as i64, tier],
+        )
+        .map_err(|error| format!("writing cache: {error}"))?;
+        Ok(())
     }
 }
 
 pub struct CachingChecker<C> {
     inner: C,
-    cache: VerdictCache,
+    cache: Arc<VerdictCache>,
     ttl: Duration,
     current_cap: u8,
     refresh: bool,
+    error: Arc<Mutex<Option<String>>>,
 }
 impl<C> CachingChecker<C> {
     pub fn new(
@@ -173,23 +211,48 @@ impl<C> CachingChecker<C> {
     ) -> Self {
         Self {
             inner,
-            cache,
+            cache: Arc::new(cache),
             ttl,
             current_cap,
             refresh,
+            error: Arc::new(Mutex::new(None)),
+        }
+    }
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().ok().and_then(|error| error.clone())
+    }
+    fn record_error(&self, error: String) {
+        if let Ok(mut recorded) = self.error.lock()
+            && recorded.is_none()
+        {
+            *recorded = Some(error);
         }
     }
 }
 impl<C: Checker> Checker for CachingChecker<C> {
     fn check(&self, url: Url) -> CheckFuture<'_> {
         Box::pin(async move {
-            if !self.refresh
-                && let Some(verdict) = self.cache.get(&url, self.ttl, self.current_cap)
-            {
-                return verdict;
+            if !self.refresh {
+                let cache = Arc::clone(&self.cache);
+                let key = url.clone();
+                let ttl = self.ttl;
+                let current_cap = self.current_cap;
+                match tokio::task::spawn_blocking(move || cache.get(&key, ttl, current_cap)).await {
+                    Ok(Ok(Some(verdict))) => return verdict,
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => self.record_error(error),
+                    Err(error) => self.record_error(format!("cache worker failed: {error}")),
+                }
             }
             let verdict = self.inner.check(url.clone()).await;
-            self.cache.put(&url, &verdict);
+            let cache = Arc::clone(&self.cache);
+            let value = verdict.clone();
+            let key = url.clone();
+            match tokio::task::spawn_blocking(move || cache.put(&key, &value)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => self.record_error(error),
+                Err(error) => self.record_error(format!("cache worker failed: {error}")),
+            }
             verdict
         })
     }
