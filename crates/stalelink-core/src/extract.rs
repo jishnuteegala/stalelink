@@ -446,7 +446,7 @@ impl Extractor for PdfExtractor {
 // changing a URI. PDF strings use UTF-16BE when BOM-prefixed.
 fn pdf_string(bytes: &[u8]) -> Option<String> {
     if bytes.starts_with(&[0xfe, 0xff]) {
-        if bytes[2..].len() % 2 != 0 {
+        if !bytes[2..].len().is_multiple_of(2) {
             return None;
         }
         String::from_utf16(
