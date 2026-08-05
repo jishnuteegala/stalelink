@@ -92,6 +92,7 @@ impl Confidence {
 pub enum Reason {
     HttpStatus(u16),
     NetworkError(NetKind),
+    #[serde(rename = "soft-404")]
     Soft404,
     LoginWall,
     PermanentRedirect,
@@ -217,6 +218,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Reason::NetworkError(NetKind::Dns)).unwrap(),
             r#"{"kind":"network-error","detail":"dns"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reason::Soft404).unwrap(),
+            r#"{"kind":"soft-404"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Reason>(r#"{"kind":"soft-404"}"#).unwrap(),
+            Reason::Soft404
         );
     }
 

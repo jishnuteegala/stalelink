@@ -1,7 +1,9 @@
 # AGENTS.md
 
 Rust CLI that scans local documents for dead and outdated links.
-Toolchain: Rust stable (MSVC on Windows). Full local gate: `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (the `check` alias in `.cargo/config.toml` runs all three).
+Toolchain: Rust stable (MSVC on Windows).
+Full local gate (run before every commit): `cargo fmt --all --check && cargo lint && cargo test --workspace`.
+`lint` is an alias in `.cargo/config.toml` for `clippy --all-targets -- -D warnings`; cargo aliases cannot chain commands, so the gate is the three-command line above.
 
 ## Agent skills
 
