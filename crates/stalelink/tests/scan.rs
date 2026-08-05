@@ -78,6 +78,50 @@ async fn fail_on_dead_certain_ignores_suspect_findings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn min_confidence_does_not_suppress_fail_on() {
+    let server = serve(&[("/missing", 404)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("note.txt"),
+        format!("{}/missing\n", server.uri()),
+    )
+    .unwrap();
+    scan(
+        dir.path(),
+        &["--min-confidence", "dead-certain", "--fail-on", "suspect"],
+    )
+    .code(1)
+    .stdout(predicate::str::contains("DEAD-CERTAIN"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_has_header_when_findings_exist() {
+    let server = serve(&[("/missing", 404)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("note.txt"),
+        format!("{}/missing\n", server.uri()),
+    )
+    .unwrap();
+    scan(dir.path(), &[]).code(1).stdout(
+        predicate::str::contains("CONFIDENCE")
+            .and(predicate::str::contains("URL"))
+            .and(predicate::str::contains("SOURCE"))
+            .and(predicate::str::contains("REASON")),
+    );
+}
+
+#[test]
+fn zero_concurrency_is_a_usage_error() {
+    Command::cargo_bin("stalelink")
+        .unwrap()
+        .args(["scan", "--max-concurrency", "0", "x.txt"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("at least 1"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn head_method_not_allowed_falls_back_to_get() {
     let server = MockServer::start().await;
     Mock::given(method("HEAD"))

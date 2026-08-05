@@ -44,6 +44,9 @@ pub async fn scan(
     progress: &impl Progress,
 ) -> Result<ScanReport, String> {
     let started = Instant::now();
+    if input.max_concurrency == 0 {
+        return Err("max_concurrency must be at least 1".into());
+    }
     let paths = walk(&input.paths, &input.walk)?;
     progress.files_walked(paths.len());
     let mut links = Vec::new();
@@ -81,7 +84,8 @@ pub async fn scan(
         .buffer_unordered(input.max_concurrency);
     let mut findings = Vec::new();
     let mut checked = 0;
-    for result in checks.collect::<Vec<_>>().await {
+    let mut checks = std::pin::pin!(checks);
+    while let Some(result) = checks.next().await {
         let (occurrences, verdict) = result?;
         checked += 1;
         progress.checks_done(checked);

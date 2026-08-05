@@ -283,6 +283,10 @@ fn run(cli: Cli) -> ExitCode {
 }
 
 fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
+    if args.common.network.max_concurrency == 0 || args.common.network.per_host == 0 {
+        eprintln!("error: --max-concurrency and --per-host must be at least 1");
+        return ExitCode::from(USAGE);
+    }
     if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
         eprintln!("error: not implemented yet");
         return ExitCode::from(ENVIRONMENT);
@@ -376,14 +380,14 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             return ExitCode::from(ENVIRONMENT);
         }
     };
-    let minimum = Confidence::from(args.common.output.min_confidence);
-    report
-        .findings
-        .retain(|finding| finding.verdict.confidence >= minimum);
     let failed = report
         .findings
         .iter()
         .any(|finding| finding.verdict.confidence >= Confidence::from(args.common.output.fail_on));
+    let minimum = Confidence::from(args.common.output.min_confidence);
+    report
+        .findings
+        .retain(|finding| finding.verdict.confidence >= minimum);
     let result = if let Some(path) = args.common.output.output {
         File::create(path).and_then(|file| TableSink(file).emit(&report))
     } else {
