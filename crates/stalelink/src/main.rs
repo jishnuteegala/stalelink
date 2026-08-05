@@ -1,8 +1,21 @@
-use std::{io, path::PathBuf, process::ExitCode};
+use std::{
+    fs::File,
+    io::{self, IsTerminal, Read, Write},
+    path::PathBuf,
+    process::ExitCode,
+    time::Duration,
+};
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
-use stalelink_core::model::Confidence;
+use regex::Regex;
+use stalelink_core::{
+    check::HttpChecker,
+    model::Confidence,
+    report::{ReportSink, TableSink},
+    scan::{NoProgress, Progress, ScanInput, scan},
+    walk::{WalkOptions, detect_format},
+};
 
 const CLEAN: u8 = 0;
 const USAGE: u8 = 2;
@@ -226,6 +239,20 @@ impl From<ConfidenceLevel> for Confidence {
     }
 }
 
+struct StderrProgress;
+impl Progress for StderrProgress {
+    fn files_walked(&self, count: usize) {
+        eprint!("\r{count} files walked");
+    }
+    fn links_found(&self, count: usize) {
+        eprint!("\r{count} links found");
+    }
+    fn checks_done(&self, count: usize) {
+        eprint!("\r{count} links checked");
+        let _ = io::stderr().flush();
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -247,11 +274,132 @@ fn run(cli: Cli) -> ExitCode {
             generate(shell, &mut command, "stalelink", &mut io::stdout());
             ExitCode::from(CLEAN)
         }
-        Command::Scan(_) | Command::Fix(_) | Command::Cache { .. } => {
+        Command::Scan(args) => run_scan(args, cli.quiet),
+        Command::Fix(_) | Command::Cache { .. } => {
             eprintln!("error: not implemented yet");
             ExitCode::from(ENVIRONMENT)
         }
     }
+}
+
+fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
+    if args.common.network.max_concurrency == 0 || args.common.network.per_host == 0 {
+        eprintln!("error: --max-concurrency and --per-host must be at least 1");
+        return ExitCode::from(USAGE);
+    }
+    // Validate argument values (usage errors) before any path or environment
+    // check, so a bad regex reports exit 2 regardless of whether a path exists.
+    let exclude_urls = match args
+        .common
+        .exclude_url
+        .iter()
+        .map(|value| Regex::new(value))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(regexes) => regexes,
+        Err(error) => {
+            eprintln!("error: invalid --exclude-url regex: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
+    if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
+        eprintln!("error: not implemented yet");
+        return ExitCode::from(ENVIRONMENT);
+    }
+    let mut paths = args.common.paths;
+    if args.common.stdin {
+        let mut input = String::new();
+        if let Err(error) = io::stdin().read_to_string(&mut input) {
+            eprintln!("error: reading stdin: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+        paths.extend(
+            input
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(PathBuf::from),
+        );
+    }
+    for path in &paths {
+        if !path.exists() {
+            eprintln!("error: path does not exist: {}", path.display());
+            return ExitCode::from(ENVIRONMENT);
+        }
+        if path.is_file() && detect_format(path).is_none() {
+            eprintln!("warning: unsupported file format: {}", path.display());
+        }
+    }
+    let checker = match HttpChecker::new(
+        Duration::from_secs(args.common.network.timeout),
+        args.common.network.retries,
+        args.common.network.per_host as usize,
+        args.common
+            .network
+            .user_agent
+            .unwrap_or_else(|| format!("stalelink/{}", env!("CARGO_PKG_VERSION"))),
+    ) {
+        Ok(checker) => checker,
+        Err(error) => {
+            eprintln!("error: creating HTTP client: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+    };
+    let input = ScanInput {
+        paths,
+        walk: WalkOptions {
+            include: args.common.include,
+            exclude: args.common.exclude,
+        },
+        max_concurrency: args.common.network.max_concurrency as usize,
+        exclude_urls,
+        exclude_domains: args
+            .common
+            .exclude_domain
+            .into_iter()
+            .map(|domain| domain.to_ascii_lowercase())
+            .collect(),
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("error: creating runtime: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+    };
+    let show_progress = !quiet && io::stderr().is_terminal();
+    let result = if show_progress {
+        runtime.block_on(scan(input, &checker, &StderrProgress))
+    } else {
+        runtime.block_on(scan(input, &checker, &NoProgress))
+    };
+    if show_progress {
+        eprintln!();
+    }
+    let mut report = match result {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+    };
+    let failed = report
+        .findings
+        .iter()
+        .any(|finding| finding.verdict.confidence >= Confidence::from(args.common.output.fail_on));
+    let minimum = Confidence::from(args.common.output.min_confidence);
+    report
+        .findings
+        .retain(|finding| finding.verdict.confidence >= minimum);
+    let result = if let Some(path) = args.common.output.output {
+        File::create(path).and_then(|file| TableSink(file).emit(&report))
+    } else {
+        TableSink(io::stdout()).emit(&report)
+    };
+    if let Err(error) = result {
+        eprintln!("error: writing report: {error}");
+        return ExitCode::from(ENVIRONMENT);
+    }
+    ExitCode::from(if failed { 1 } else { CLEAN })
 }
 
 #[cfg(test)]
