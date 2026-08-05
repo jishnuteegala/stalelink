@@ -1,4 +1,4 @@
-use std::{ops::Range, path::PathBuf};
+use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use html5tokenizer::{
     NaiveParser, Token, TracingEmitter,
@@ -6,7 +6,7 @@ use html5tokenizer::{
     trace::{AttrValueSyntax, Trace},
 };
 use linkify::{LinkFinder, LinkKind};
-use pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{Event, LinkType, Parser, Tag};
 use url::Url;
 
 use crate::model::{DocFormat, FoundLink, Location, SourceRef};
@@ -67,11 +67,6 @@ fn text_of(doc: &SourceDocument) -> Result<&str, ExtractError> {
     std::str::from_utf8(&doc.bytes).map_err(|e| ExtractError(e.to_string()))
 }
 
-fn locate(text: &str, needle: &str, within: &Range<usize>) -> Option<Range<usize>> {
-    let offset = text.get(within.clone())?.find(needle)? + within.start;
-    Some(offset..offset + needle.len())
-}
-
 // A span is only usable if it is well-ordered, in bounds, and lands on UTF-8
 // boundaries; otherwise slicing the source would panic. Some HTML attribute
 // syntaxes (e.g. unquoted values) yield inverted or out-of-range traces.
@@ -106,28 +101,67 @@ fn repair_span(
 
 // Locate the raw destination of a Markdown inline link inside its event span.
 // pulldown gives the whole `[label](dest)` span and a *decoded* destination, so
-// we find the `](` that opens the destination and parse the CommonMark
-// destination grammar: either an angle-bracket `<...>` form or a bare form of
-// balanced parentheses that ends at the first unescaped whitespace or the
-// closing `)`. The decoded raw slice must equal `dest_url` to confirm the match.
+// we find the `](` that closes the label and opens the destination, then parse
+// the CommonMark destination grammar: an angle-bracket `<...>` form or a bare
+// form of balanced parentheses ending at the first unescaped whitespace or the
+// depth-zero `)`. The decoded raw slice must equal `dest_url` to confirm.
 fn inline_dest_span(text: &str, event: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
-    let slice = text.get(event.clone())?;
-    let open = slice.rfind("](")? + 2 + event.start;
+    let open = label_close(text, event)? + 1;
     let rest = text.get(open..event.end)?;
     let span = if rest.starts_with('<') {
         angle_dest(open, rest)
     } else {
         bare_dest(open, rest)
     }?;
-    // Confirm this really is the destination: unescaping the raw slice (minus
-    // any angle brackets) must yield the decoded semantic URL.
+    confirm(text, span, dest_url)
+}
+// The label runs from the event's `[` to the matching `]` at bracket depth
+// zero (labels may contain balanced brackets), which must be immediately
+// followed by `(` for an inline link. Returns the byte index of that `(`.
+fn label_close(text: &str, event: &Range<usize>) -> Option<usize> {
+    let slice = text.get(event.clone())?;
+    let mut escaped = false;
+    let mut depth: i32 = 0;
+    for (i, c) in slice.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let paren = event.start + i + 1;
+                    return (text.as_bytes().get(paren) == Some(&b'(')).then_some(paren);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+// Locate a definition's destination within its exact `[label]: dest` span, so
+// reference links resolve to their own definition, never a URL elsewhere.
+fn dest_in_definition(text: &str, def_span: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
+    let slice = text.get(def_span.clone())?;
+    let colon = slice.find("]:")? + 2;
+    let after = &slice[colon..];
+    let dest_start = def_span.start + colon + (after.len() - after.trim_start().len());
+    let rest = text.get(dest_start..def_span.end)?;
+    let span = if rest.starts_with('<') {
+        angle_dest(dest_start, rest)
+    } else {
+        bare_dest(dest_start, rest)
+    }?;
+    confirm(text, span, dest_url)
+}
+// Confirm a raw span decodes to the semantic destination pulldown reported.
+fn confirm(text: &str, span: Range<usize>, dest_url: &str) -> Option<Range<usize>> {
     let raw = text.get(span.clone())?;
     let inner = raw.strip_prefix('<').and_then(|s| s.strip_suffix('>'));
-    if unescape_dest(inner.unwrap_or(raw)) == dest_url {
-        Some(span)
-    } else {
-        None
-    }
+    (decode_dest(inner.unwrap_or(raw)) == dest_url).then_some(span)
 }
 // `<...>` destination: spans from `<` to the first unescaped `>`.
 fn angle_dest(open: usize, rest: &str) -> Option<Range<usize>> {
@@ -162,56 +196,74 @@ fn bare_dest(open: usize, rest: &str) -> Option<Range<usize>> {
             _ => {}
         }
     }
-    None
+    // No terminator: the destination runs to the end of the slice (e.g. a
+    // reference definition that ends at the line/span boundary).
+    (depth == 0 && open < open + rest.len()).then_some(open..open + rest.len())
 }
-
-// Reference links carry no destination in the event; the URL lives at a
-// `[label]: url` definition. Locate that definition's destination so we do not
-// mis-attribute the span to an identical bare URL earlier in the document.
-fn reference_def_span(text: &str, dest_url: &str) -> Option<Range<usize>> {
-    for (line_start, line) in line_offsets(text) {
-        let Some(colon) = line.find("]:") else {
-            continue;
-        };
-        let after = &line[colon + 2..];
-        let trimmed = after.trim_start();
-        let dest_start = line_start + colon + 2 + (after.len() - trimmed.len());
-        let rest = &text[dest_start..];
-        let span = if rest.starts_with('<') {
-            angle_dest(dest_start, rest)
-        } else {
-            bare_dest(dest_start, rest)
-        }?;
-        let raw = text.get(span.clone())?;
-        let inner = raw.strip_prefix('<').and_then(|s| s.strip_suffix('>'));
-        if unescape_dest(inner.unwrap_or(raw)) == dest_url {
-            return Some(span);
+// CommonMark case-folds reference labels; pulldown uses UniCase, and lowercase
+// folding matches it for the ASCII/common labels we resolve here.
+fn fold_label(label: &str) -> String {
+    label.to_lowercase()
+}
+// A Markdown destination decodes both backslash escapes of ASCII punctuation
+// and HTML character/entity references (pulldown applies both), so mirror that
+// when comparing a raw source slice against the semantic destination.
+fn decode_dest(raw: &str) -> String {
+    let unescaped = {
+        let mut out = String::with_capacity(raw.len());
+        let mut chars = raw.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\'
+                && let Some(&next) = chars.as_str().as_bytes().first()
+                && next.is_ascii_punctuation()
+            {
+                continue;
+            }
+            out.push(c);
         }
-    }
-    None
+        out
+    };
+    decode_entities(&unescaped)
 }
-fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
-    let mut offset = 0;
-    text.lines().map(move |line| {
-        let start = offset;
-        offset += line.len() + 1;
-        (start, line)
-    })
-}
-// Markdown backslash-unescapes ASCII punctuation in link destinations.
-fn unescape_dest(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
-    while let Some(c) = chars.next() {
-        if c == '\\'
-            && let Some(&next) = chars.as_str().as_bytes().first()
-            && next.is_ascii_punctuation()
+// Decode the HTML entities a Markdown destination may contain (e.g. `&amp;`).
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        if let Some(semi) = tail.find(';')
+            && let Some(decoded) = entity(&tail[..=semi])
         {
-            continue;
+            out.push_str(&decoded);
+            rest = &tail[semi + 1..];
+        } else {
+            out.push('&');
+            rest = &tail[1..];
         }
-        out.push(c);
     }
+    out.push_str(rest);
     out
+}
+// Minimal entity table: the named/numeric references that realistically appear
+// inside URLs. Unknown entities are left verbatim by the caller.
+fn entity(reference: &str) -> Option<String> {
+    match reference {
+        "&amp;" => Some("&".into()),
+        "&lt;" => Some("<".into()),
+        "&gt;" => Some(">".into()),
+        "&quot;" => Some("\"".into()),
+        "&#39;" | "&apos;" => Some("'".into()),
+        _ => {
+            let num = reference.strip_prefix("&#")?.strip_suffix(';')?;
+            let code = if let Some(hex) = num.strip_prefix(['x', 'X']) {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                num.parse().ok()?
+            };
+            Some(char::from_u32(code)?.to_string())
+        }
+    }
 }
 
 impl Extractor for TextExtractor {
@@ -231,25 +283,48 @@ impl Extractor for MarkdownExtractor {
         let text = text_of(doc)?;
         let mut links = Vec::new();
         let mut link_ranges: Vec<Range<usize>> = Vec::new();
+        // Reference definitions carry an exact `[label]: dest` source span keyed
+        // by (case-folded) label; capture them so a reference link resolves to
+        // its own definition rather than an identical URL elsewhere. A second
+        // parser drives event iteration below (both parses are pure).
+        let ref_defs: HashMap<String, Range<usize>> = Parser::new(text)
+            .reference_definitions()
+            .iter()
+            .map(|(label, def)| (fold_label(label), def.span.clone()))
+            .collect();
         for (event, span) in Parser::new(text).into_offset_iter() {
-            if let Event::Start(Tag::Link { dest_url, .. }) = event {
+            if let Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                id,
+                ..
+            }) = event
+            {
                 link_ranges.push(span.clone());
-                // pulldown gives the whole `[text](url)` span and a decoded
-                // destination; find the destination's own raw span within the
-                // event, preferring the raw (possibly escaped) spelling.
-                if is_http(&dest_url) {
-                    // Inline links carry the raw destination after `](`; locate
-                    // it precisely so the span never covers the label. Reference
-                    // links do not: the URL text lives only at the `[label]: url`
-                    // definition, so fall back to the definition site elsewhere
-                    // in the document, and dedupe uses that share it. Never
-                    // substitute the whole link event as a destination span.
-                    let dest_span = inline_dest_span(text, &span, &dest_url)
-                        .or_else(|| reference_def_span(text, &dest_url))
-                        .or_else(|| locate(text, &dest_url, &(0..text.len())));
-                    if let Some(dest_span) = dest_span {
-                        links.push(link(doc, &dest_url, dest_span));
-                    }
+                if !is_http(&dest_url) {
+                    continue;
+                }
+                // pulldown decodes entities in inline destinations but not in
+                // reference definitions; normalise so the semantic URL (what a
+                // checker fetches) is always fully decoded and comparable.
+                let dest_url = decode_entities(&dest_url);
+                // Inline links carry the raw destination inside the event after
+                // the label; reference/collapsed/shortcut links carry it only in
+                // the definition. Resolve each to an exact raw span; never
+                // substitute the whole event or a whole-document string search.
+                let dest_span = if link_type == LinkType::Inline {
+                    inline_dest_span(text, &span, &dest_url)
+                } else {
+                    ref_defs
+                        .get(&fold_label(&id))
+                        .and_then(|def_span| dest_in_definition(text, def_span, &dest_url))
+                };
+                if let Some(dest_span) = dest_span {
+                    // Suppress a duplicate bare-URL match over the same raw
+                    // destination bytes (e.g. inside a reference definition,
+                    // which is not part of the link event span).
+                    link_ranges.push(dest_span.clone());
+                    links.push(link(doc, &dest_url, dest_span));
                 }
             }
         }
@@ -515,6 +590,61 @@ mod tests {
             })
             .expect("reference link resolved to its definition");
         assert_eq!(reference.url, "https://example.test/x");
+    }
+    #[test]
+    fn markdown_inline_destination_with_title_excludes_the_title() {
+        let text = "[x](https://example.test/a \"the title\")";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/a"
+        );
+    }
+    #[test]
+    fn markdown_inline_destination_decodes_entities() {
+        let text = "[x](https://example.test/a?x=1&amp;y=2)";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a?x=1&y=2");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/a?x=1&amp;y=2"
+        );
+    }
+    #[test]
+    fn markdown_reference_destination_decodes_entities() {
+        let text = "[it][r]\n\n[r]: https://example.test/a?x=1&amp;y=2\n";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a?x=1&y=2");
+    }
+    #[test]
+    fn markdown_label_containing_bracket_paren_finds_real_destination() {
+        let text = "[a ](b) c](https://example.test/x)";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/x");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/x"
+        );
+    }
+    #[test]
+    fn markdown_crlf_reference_definition_has_exact_span() {
+        let text = "line one\r\n\r\nuse [it][r]\r\n\r\n[r]: https://example.test/a?x=1&amp;y=2\r\n";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a?x=1&y=2");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/a?x=1&amp;y=2"
+        );
     }
     #[test]
     fn html_unquoted_mixed_case_attributes_have_valid_spans() {
