@@ -17,10 +17,12 @@ regex.workspace = true
 tokio.workspace = true
 url.workspace = true
 unicode-width.workspace = true
-lychee-lib.workspace = true
 reqwest.workspace = true
+hyper.workspace = true
 futures.workspace = true
+httpdate.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+wiremock = "0.6"

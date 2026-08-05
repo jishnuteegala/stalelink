@@ -12,7 +12,7 @@ use url::Url;
 use crate::{
     check::Checker,
     extract::{SourceDocument, extract},
-    model::{Finding, FoundLink},
+    model::{Finding, FixOrigin, Fixability, FoundLink, SuggestedFix, Verdict},
     walk::{WalkOptions, detect_format, walk},
 };
 
@@ -90,7 +90,7 @@ pub async fn scan(
                 resolved_url: None,
                 source: link.source,
                 verdict: verdict.clone(),
-                fix: None,
+                fix: suggested_fix(&verdict),
             }));
         }
     }
@@ -100,6 +100,27 @@ pub async fn scan(
         links_checked: checked,
         links_unique: unique,
         duration: started.elapsed(),
+    })
+}
+fn suggested_fix(verdict: &Verdict) -> Option<SuggestedFix> {
+    let (kind, origin) = match verdict.reason {
+        crate::model::Reason::PermanentRedirect => ("redirect-target", FixOrigin::RedirectTarget),
+        crate::model::Reason::VersionDrift => ("version-upgrade", FixOrigin::VersionUpgrade),
+        _ => return None,
+    };
+    let replacement_url = verdict
+        .evidence
+        .iter()
+        .find(|evidence| evidence.kind == kind)?
+        .detail
+        .parse::<Url>()
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))?
+        .to_string();
+    Some(SuggestedFix {
+        replacement_url,
+        origin,
+        fixable: Fixability::Auto,
     })
 }
 fn collect_links(
@@ -173,6 +194,14 @@ mod tests {
         }
     }
 
+    struct VerdictChecker(Verdict);
+    impl Checker for VerdictChecker {
+        fn check(&self, _: Url) -> CheckFuture<'_> {
+            let verdict = self.0.clone();
+            Box::pin(async move { Some(verdict) })
+        }
+    }
+
     #[tokio::test]
     async fn deduplicates_checks_but_reports_each_occurrence() {
         let file = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
@@ -194,5 +223,93 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(report.findings.len(), 2);
         assert_eq!(report.links_unique, 1);
+    }
+
+    #[tokio::test]
+    async fn scan_creates_complete_automatic_fixes_for_valid_evidence() {
+        let redirect = Verdict {
+            confidence: Confidence::Outdated,
+            reason: Reason::PermanentRedirect,
+            evidence: vec![Evidence {
+                kind: "redirect-target".into(),
+                detail: "https://example.test/current".into(),
+            }],
+            checked_at: Utc::now(),
+            tier: 1,
+        };
+        let version = Verdict {
+            confidence: Confidence::Outdated,
+            reason: Reason::VersionDrift,
+            evidence: vec![Evidence {
+                kind: "version-upgrade".into(),
+                detail: "https://example.test/v2/items".into(),
+            }],
+            checked_at: Utc::now(),
+            tier: 1,
+        };
+        let file = tempfile::NamedTempFile::with_suffix(".txt").unwrap();
+        std::fs::write(file.path(), "https://example.test/old").unwrap();
+        for (verdict, replacement_url, origin) in [
+            (
+                redirect,
+                "https://example.test/current",
+                FixOrigin::RedirectTarget,
+            ),
+            (
+                version,
+                "https://example.test/v2/items",
+                FixOrigin::VersionUpgrade,
+            ),
+        ] {
+            let report = scan(
+                ScanInput {
+                    paths: vec![file.path().into()],
+                    walk: WalkOptions::default(),
+                    max_concurrency: 1,
+                    exclude_urls: vec![],
+                    exclude_domains: vec![],
+                },
+                &VerdictChecker(verdict),
+                &NoProgress,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                report.findings[0].fix,
+                Some(SuggestedFix {
+                    replacement_url: replacement_url.into(),
+                    origin,
+                    fixable: Fixability::Auto,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_or_non_http_fix_evidence_is_rejected() {
+        for detail in ["not a url", "file:///local/path"] {
+            let verdict = Verdict {
+                confidence: Confidence::Outdated,
+                reason: Reason::PermanentRedirect,
+                evidence: vec![Evidence {
+                    kind: "redirect-target".into(),
+                    detail: detail.into(),
+                }],
+                checked_at: Utc::now(),
+                tier: 1,
+            };
+            assert!(suggested_fix(&verdict).is_none());
+        }
+        let no_fix = Verdict {
+            confidence: Confidence::Outdated,
+            reason: Reason::StalenessBanner,
+            evidence: vec![Evidence {
+                kind: "staleness-phrase".into(),
+                detail: "deprecated".into(),
+            }],
+            checked_at: Utc::now(),
+            tier: 1,
+        };
+        assert!(suggested_fix(&no_fix).is_none());
     }
 }
