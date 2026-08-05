@@ -27,6 +27,10 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Option<DocFormat> {
             return Some(DocFormat::Pptx);
         }
     }
+    extension_format(path).or_else(|| text_like(bytes).then_some(DocFormat::Text))
+}
+
+pub fn extension_format(path: &Path) -> Option<DocFormat> {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -40,7 +44,6 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Option<DocFormat> {
         Some("docx") => Some(DocFormat::Docx),
         Some("xlsx") => Some(DocFormat::Xlsx),
         Some("pptx") => Some(DocFormat::Pptx),
-        _ if text_like(bytes) => Some(DocFormat::Text),
         _ => None,
     }
 }

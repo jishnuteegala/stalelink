@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::Read,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -13,7 +14,7 @@ use crate::{
     check::Checker,
     extract::{SourceDocument, extract},
     model::{Finding, FixOrigin, Fixability, FoundLink, SuggestedFix, Verdict},
-    walk::{WalkOptions, detect_format, walk},
+    walk::{WalkOptions, detect_format, extension_format, walk},
 };
 
 pub struct ScanInput {
@@ -123,6 +124,8 @@ fn suggested_fix(verdict: &Verdict) -> Option<SuggestedFix> {
         fixable: Fixability::Auto,
     })
 }
+const UNKNOWN_FILE_LIMIT: u64 = 2 * 1024 * 1024;
+
 fn collect_links(
     paths_input: &[PathBuf],
     walk_opts: &WalkOptions,
@@ -130,7 +133,9 @@ fn collect_links(
     let paths = walk(paths_input, walk_opts)?;
     let mut links = Vec::new();
     for path in &paths {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Some(bytes) = read_for_detection(path)? else {
+            continue;
+        };
         let Some(format) = detect_format(path, &bytes) else {
             continue;
         };
@@ -144,6 +149,33 @@ fn collect_links(
         );
     }
     Ok((paths, links))
+}
+
+fn read_for_detection(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut bytes = vec![0; 8 * 1024];
+    let read = file
+        .read(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    bytes.truncate(read);
+
+    let has_binary_magic = bytes.starts_with(b"%PDF-") || bytes.starts_with(b"PK\x03\x04");
+    // Unknown files have no user-declared format to preserve. Limit them before
+    // allocating their complete contents; known extensions and magic keep their
+    // full-read behavior so mis-extensioned supported documents still work.
+    if extension_format(path).is_none()
+        && !has_binary_magic
+        && file
+            .metadata()
+            .map_err(|e| format!("{}: {e}", path.display()))?
+            .len()
+            > UNKNOWN_FILE_LIMIT
+    {
+        return Ok(None);
+    }
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(Some(bytes))
 }
 fn allowed(link: &FoundLink, input: &ScanInput) -> bool {
     if input
@@ -228,6 +260,36 @@ mod tests {
         .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].url, "https://real.test/x");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn skips_large_unknown_files_but_scans_large_known_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("large.unknown"),
+            vec![0; 3 * 1024 * 1024],
+        )
+        .unwrap();
+        let mut text = vec![b'a'; 3 * 1024 * 1024];
+        text.extend_from_slice(b" https://large-known.test/x");
+        std::fs::write(directory.path().join("large.txt"), text).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 1,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "https://large-known.test/x");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -358,14 +420,14 @@ mod tests {
             zip::write::SimpleFileOptions::default(),
         )
         .unwrap();
-        zip.write_all(br#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:instrText>HYPERLINK &quot;https://mixed.test/docx&quot;</w:instrText></w:r></w:p></w:body></w:document>"#).unwrap();
+        zip.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:instrText>HYPERLINK &quot;https://mixed.test/docx&quot;</w:instrText></w:r></w:p></w:body></w:document>"#).unwrap();
         let docx = zip.finish().unwrap().into_inner();
         std::fs::write(directory.path().join("four.bin"), docx).unwrap();
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         for (name, xml) in [
             (
                 "xl/workbook.xml",
-                r#"<workbook xmlns:r="r"><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>"#,
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>"#,
             ),
             (
                 "xl/_rels/workbook.xml.rels",
@@ -373,7 +435,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet><sheetData><row><c r="A1"><f>HYPERLINK(&quot;https://mixed.test/xlsx&quot;)</f></c></row></sheetData></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1"><f>HYPERLINK(&quot;https://mixed.test/xlsx&quot;)</f></c></row></sheetData></worksheet>"#,
             ),
         ] {
             zip.start_file(name, zip::write::SimpleFileOptions::default())
@@ -389,7 +451,7 @@ mod tests {
         for (name, xml) in [
             (
                 "ppt/slides/slide1.xml",
-                r#"<p:sld xmlns:p="p" xmlns:r="r"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
             ),
             (
                 "ppt/slides/_rels/slide1.xml.rels",

@@ -446,6 +446,9 @@ impl Extractor for PdfExtractor {
 // changing a URI. PDF strings use UTF-16BE when BOM-prefixed.
 fn pdf_string(bytes: &[u8]) -> Option<String> {
     if bytes.starts_with(&[0xfe, 0xff]) {
+        if bytes[2..].len() % 2 != 0 {
+            return None;
+        }
         String::from_utf16(
             &bytes[2..]
                 .chunks_exact(2)
@@ -605,12 +608,6 @@ fn relationships(
     Ok(relationships)
 }
 
-fn attribute<'a>(attributes: &'a HashMap<String, String>, suffix: &str) -> Option<&'a str> {
-    attributes
-        .iter()
-        .find_map(|(key, value)| key.ends_with(suffix).then_some(value.as_str()))
-}
-
 fn link_from_field(text: &str) -> Option<&str> {
     let start = text.find("HYPERLINK")? + "HYPERLINK".len();
     let rest = &text[start..];
@@ -628,26 +625,15 @@ fn resolved_name(
     event: &quick_xml::events::BytesStart<'_>,
     namespace: &[u8],
     local: &[u8],
-    legacy_namespace: &[u8],
 ) -> bool {
-    match resolved {
-        ResolveResult::Bound(uri) => {
-            // Existing lightweight fixtures use the prefix itself as a stand-in
-            // namespace. Keep that narrow compatibility form, never a raw-name
-            // fallback, so an explicitly unrelated binding remains rejected.
-            (uri.as_ref() == namespace || uri.as_ref() == legacy_namespace)
-                && event.local_name().as_ref() == local
-        }
-        ResolveResult::Unbound => event.local_name().as_ref() == local,
-        ResolveResult::Unknown(prefix) => {
-            prefix.as_slice() == legacy_namespace && event.local_name().as_ref() == local
-        }
-    }
+    matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == namespace)
+        && event.local_name().as_ref() == local
 }
 
 const WORD_NS: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
 const PRESENTATION_NS: &[u8] = b"http://schemas.openxmlformats.org/presentationml/2006/main";
 const DRAWING_NS: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/main";
+const SPREADSHEET_NS: &[u8] = b"http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELATIONSHIPS_NS: &[u8] =
     b"http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
@@ -656,9 +642,23 @@ fn relationship_part(part: &str) -> String {
     format!("{directory}/_rels/{name}.rels")
 }
 
-fn local_attribute<'a>(attributes: &'a HashMap<String, String>, name: &str) -> Option<&'a str> {
-    attributes.iter().find_map(|(key, value)| {
-        (key == name || key.ends_with(&format!(":{name}"))).then_some(value.as_str())
+fn resolved_attribute(
+    reader: &NsReader<&[u8]>,
+    event: &quick_xml::events::BytesStart<'_>,
+    namespace: &[u8],
+    local: &[u8],
+) -> Option<String> {
+    event.attributes().flatten().find_map(|attribute| {
+        let (resolved, attribute_local) = reader.resolver().resolve_attribute(attribute.key);
+        (matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == namespace)
+            && attribute_local.as_ref() == local)
+            .then(|| {
+                attribute
+                    .unescape_value()
+                    .ok()
+                    .map(|value| value.into_owned())
+            })
+            .flatten()
     })
 }
 
@@ -710,18 +710,23 @@ fn extract_docx(
     loop {
         match reader.read_resolved_event() {
             Ok((resolved, XmlEvent::Start(event))) | Ok((resolved, XmlEvent::Empty(event))) => {
-                let attributes = attributes(&event);
-                if resolved_name(&resolved, &event, WORD_NS, b"p", b"w") {
+                let paragraph_element = resolved_name(&resolved, &event, WORD_NS, b"p");
+                let hyperlink = resolved_name(&resolved, &event, WORD_NS, b"hyperlink");
+                let field_character = resolved_name(&resolved, &event, WORD_NS, b"fldChar");
+                let simple_field = resolved_name(&resolved, &event, WORD_NS, b"fldSimple");
+                let instruction_element = resolved_name(&resolved, &event, WORD_NS, b"instrText");
+                let _ = resolved;
+                if paragraph_element {
                     paragraph += 1;
                 }
-                if resolved_name(&resolved, &event, WORD_NS, b"hyperlink", b"w")
-                    && let Some(id) = attribute(&attributes, ":id")
-                    && let Some(url) = relations.get(id)
+                if hyperlink
+                    && let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id")
+                    && let Some(url) = relations.get(&id)
                 {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
                 }
-                if resolved_name(&resolved, &event, WORD_NS, b"fldChar", b"w") {
-                    match local_attribute(&attributes, "fldCharType") {
+                if field_character {
+                    match resolved_attribute(&reader, &event, WORD_NS, b"fldCharType").as_deref() {
                         Some("begin") => field = Some((paragraph, String::new())),
                         Some("end") => {
                             if let Some((paragraph, instruction)) = field.take()
@@ -733,13 +738,14 @@ fn extract_docx(
                         _ => {}
                     }
                 }
-                if resolved_name(&resolved, &event, WORD_NS, b"fldSimple", b"w")
-                    && let Some(instruction) = local_attribute(&attributes, "instr")
-                    && let Some(url) = link_from_field(instruction)
+                if simple_field
+                    && let Some(instruction) =
+                        resolved_attribute(&reader, &event, WORD_NS, b"instr")
+                    && let Some(url) = link_from_field(&instruction)
                 {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
                 }
-                if resolved_name(&resolved, &event, WORD_NS, b"instrText", b"w") {
+                if instruction_element {
                     instruction_text = Some((paragraph, String::new()));
                 }
             }
@@ -781,9 +787,7 @@ fn extract_docx(
                 }
             }
             Ok((resolved, XmlEvent::End(event)))
-                if (matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == WORD_NS || uri.as_ref() == b"w")
-                    || matches!(resolved, ResolveResult::Unbound)
-                    || matches!(&resolved, ResolveResult::Unknown(prefix) if prefix.as_slice() == b"w"))
+                if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == WORD_NS)
                     && event.local_name().as_ref() == b"instrText" =>
             {
                 if let Some((paragraph, instruction)) = instruction_text.take()
@@ -809,22 +813,23 @@ fn extract_xlsx(
         .map(|xml| relationships("xl/_rels/workbook.xml.rels", &xml, false))
         .transpose()?
         .unwrap_or_default();
-    let mut reader = Reader::from_str(&workbook);
+    let mut reader = NsReader::from_str(&workbook);
     let mut sheets = Vec::new();
     loop {
-        match reader.read_event() {
-            Ok(XmlEvent::Empty(event)) | Ok(XmlEvent::Start(event))
-                if event.local_name().as_ref() == b"sheet" =>
+        match reader.read_resolved_event() {
+            Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event)))
+                if resolved_name(&resolved, &event, SPREADSHEET_NS, b"sheet") =>
             {
                 let attributes = attributes(&event);
-                if let (Some(name), Some(id)) =
-                    (attributes.get("name"), attribute(&attributes, ":id"))
-                    && let Some(target) = workbook_relations.get(id)
+                if let (Some(name), Some(id)) = (
+                    attributes.get("name"),
+                    resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                ) && let Some(target) = workbook_relations.get(&id)
                 {
                     sheets.push((name.clone(), resolve_target("xl/workbook.xml", target)));
                 }
             }
-            Ok(XmlEvent::Eof) => break,
+            Ok((_, XmlEvent::Eof)) => break,
             _ => {}
         }
     }
@@ -836,23 +841,25 @@ fn extract_xlsx(
             .transpose()?
             .unwrap_or_default();
         let xml = zip_text(archive, &path)?.replace("&quot;", "\"");
-        let mut reader = Reader::from_str(&xml);
+        let mut reader = NsReader::from_str(&xml);
         let mut cell = String::new();
         let mut formula = false;
         loop {
-            match reader.read_event() {
-                Ok(XmlEvent::Start(event)) => {
+            match reader.read_resolved_event() {
+                Ok((resolved, XmlEvent::Start(event))) => {
                     let attributes = attributes(&event);
-                    if event.local_name().as_ref() == b"c" {
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"c") {
                         cell = attributes.get("r").cloned().unwrap_or_default();
                     }
-                    if event.local_name().as_ref() == b"f" {
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"f") {
                         formula = true;
                     }
-                    if event.local_name().as_ref() == b"hyperlink"
-                        && let (Some(reference), Some(id)) =
-                            (attributes.get("ref"), attribute(&attributes, ":id"))
-                        && let Some(url) = relations.get(id)
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink")
+                        && let (Some(reference), Some(id)) = (
+                            attributes.get("ref"),
+                            resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                        )
+                        && let Some(url) = relations.get(&id)
                     {
                         links.push(binary_link(
                             doc,
@@ -864,11 +871,14 @@ fn extract_xlsx(
                         ));
                     }
                 }
-                Ok(XmlEvent::Empty(event)) if event.local_name().as_ref() == b"hyperlink" => {
+                Ok((resolved, XmlEvent::Empty(event)))
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink") =>
+                {
                     let attributes = attributes(&event);
-                    if let (Some(reference), Some(id)) =
-                        (attributes.get("ref"), attribute(&attributes, ":id"))
-                        && let Some(url) = relations.get(id)
+                    if let (Some(reference), Some(id)) = (
+                        attributes.get("ref"),
+                        resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                    ) && let Some(url) = relations.get(&id)
                     {
                         links.push(binary_link(
                             doc,
@@ -880,7 +890,7 @@ fn extract_xlsx(
                         ));
                     }
                 }
-                Ok(XmlEvent::Text(event)) if formula => {
+                Ok((_, XmlEvent::Text(event))) if formula => {
                     let text = event
                         .xml_content()
                         .map_err(|error| ExtractError(error.to_string()))?
@@ -896,8 +906,13 @@ fn extract_xlsx(
                         ));
                     }
                 }
-                Ok(XmlEvent::End(event)) if event.local_name().as_ref() == b"f" => formula = false,
-                Ok(XmlEvent::Eof) => break,
+                Ok((resolved, XmlEvent::End(event)))
+                    if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
+                        && event.local_name().as_ref() == b"f" =>
+                {
+                    formula = false;
+                }
+                Ok((_, XmlEvent::Eof)) => break,
                 Err(error) => return Err(ExtractError(error.to_string())),
                 _ => {}
             }
@@ -920,11 +935,10 @@ fn extract_pptx(
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event)))
-                    if resolved_name(&resolved, &event, PRESENTATION_NS, b"sldId", b"p") =>
+                    if resolved_name(&resolved, &event, PRESENTATION_NS, b"sldId") =>
                 {
-                    let attributes = attributes(&event);
-                    if let Some(id) = attribute(&attributes, ":id")
-                        && let Some(target) = presentation_relations.get(id)
+                    if let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id")
+                        && let Some(target) = presentation_relations.get(&id)
                     {
                         slides.push(resolve_target("ppt/presentation.xml", target));
                     }
@@ -960,20 +974,10 @@ fn extract_pptx(
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event))) => {
-                    if resolved_name(&resolved, &event, DRAWING_NS, b"hlinkClick", b"a")
-                        || resolved_name(&resolved, &event, DRAWING_NS, b"hlinkHover", b"a")
+                    if resolved_name(&resolved, &event, DRAWING_NS, b"hlinkClick")
+                        || resolved_name(&resolved, &event, DRAWING_NS, b"hlinkHover")
                     {
-                        let id = event.attributes().find_map(|attribute| {
-                            let attribute = attribute.ok()?;
-                            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-                            let is_relationship_id = (matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == RELATIONSHIPS_NS || uri.as_ref() == b"r")
-                                || matches!(namespace, ResolveResult::Unbound)
-                                || matches!(namespace, ResolveResult::Unknown(prefix) if prefix.as_slice() == b"r"))
-                                && local.as_ref() == b"id";
-                            is_relationship_id
-                                .then(|| attribute.unescape_value().ok().map(|value| value.into_owned()))
-                                .flatten()
-                        });
+                        let id = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id");
                         if let Some(id) = id.as_deref()
                             && let Some(url) = relations.get(id)
                         {
@@ -1467,6 +1471,7 @@ mod tests {
             Some("https://example.test/a\u{2013}b".into())
         );
         assert_eq!(pdf_string(b"https://example.test/\x7f"), None);
+        assert_eq!(pdf_string(b"\xfe\xff\0h\0t\0t\0p\0s\0:\xff"), None);
     }
 
     #[test]
@@ -1529,7 +1534,7 @@ mod tests {
         let xlsx = zip(&[
             (
                 "xl/workbook.xml",
-                "<workbook><sheets><sheet name=\"S\" r:id=\"r1\"/></sheets></workbook>",
+                "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"S\" r:id=\"r1\"/></sheets></workbook>",
             ),
             (
                 "xl/_rels/workbook.xml.rels",
@@ -1542,7 +1547,10 @@ mod tests {
             ),
         ]);
         let pptx = zip(&[
-            ("ppt/slides/slide1.xml", "<p:sld xmlns:p=\"p\"/>"),
+            (
+                "ppt/slides/slide1.xml",
+                "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"/>",
+            ),
             (
                 "ppt/slides/_rels/slide1.xml.rels",
                 "<Relationships><Relationship",
@@ -1571,7 +1579,7 @@ mod tests {
             ),
             (
                 "word/document.xml",
-                r#"<w:document xmlns:w="w" xmlns:r="r"><w:body><w:p><w:hyperlink r:id="rId1"/></w:p><w:p><w:r><w:instrText> HYPERLINK &quot;https://field.test/x&quot; </w:instrText></w:r></w:p></w:body></w:document>"#,
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="rId1"/></w:p><w:p><w:r><w:instrText> HYPERLINK &quot;https://field.test/x&quot; </w:instrText></w:r></w:p></w:body></w:document>"#,
             ),
         ]);
         let links = extract(&binary_document(DocFormat::Docx, bytes)).unwrap();
@@ -1620,6 +1628,16 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+
+        let one_letter = zip(&[(
+            "word/document.xml",
+            r#"<q:document xmlns:q="w"><q:body><q:p><q:fldSimple q:instr="HYPERLINK &quot;https://one-letter.test/x&quot;"/></q:p></q:body></q:document>"#,
+        )]);
+        assert!(
+            extract(&binary_document(DocFormat::Docx, one_letter))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1637,7 +1655,7 @@ mod tests {
         let bytes = zip(&[
             (
                 "xl/workbook.xml",
-                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="r"><sheets><sheet name="Absolute" r:id="r1"/><sheet name="Dot" r:id="r2"/></sheets></workbook>"#,
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Absolute" r:id="r1"/><sheet name="Dot" r:id="r2"/></sheets></workbook>"#,
             ),
             (
                 "xl/_rels/workbook.xml.rels",
@@ -1666,16 +1684,19 @@ mod tests {
         let bytes = zip(&[
             (
                 "ppt/presentation.xml",
-                r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="r"><p:sldIdLst><p:sldId r:id="second"/><p:sldId r:id="first"/></p:sldIdLst></p:presentation>"#,
+                r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="second"/><p:sldId r:id="first"/></p:sldIdLst></p:presentation>"#,
             ),
             (
                 "ppt/_rels/presentation.xml.rels",
                 r#"<Relationships><Relationship Id="first" Target="slides/slide1.xml"/><Relationship Id="second" Target="slides/slide2.xml"/></Relationships>"#,
             ),
-            ("ppt/slides/slide1.xml", r#"<p:sld xmlns:p="p"/>"#),
+            (
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+            ),
             (
                 "ppt/slides/slide2.xml",
-                r#"<p:sld xmlns:p="p" xmlns:r="r"><p:cNvPr><a:hlinkClick r:id="link"/></p:cNvPr></p:sld>"#,
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cNvPr><a:hlinkClick r:id="link"/></p:cNvPr></p:sld>"#,
             ),
             (
                 "ppt/slides/_rels/slide2.xml.rels",
@@ -1691,7 +1712,7 @@ mod tests {
         let xlsx = zip(&[
             (
                 "xl/workbook.xml",
-                r#"<workbook xmlns:r="r"><sheets><sheet name="Links" r:id="rId1"/></sheets></workbook>"#,
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Links" r:id="rId1"/></sheets></workbook>"#,
             ),
             (
                 "xl/_rels/workbook.xml.rels",
@@ -1699,7 +1720,7 @@ mod tests {
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet xmlns:r="r"><sheetData><row><c r="B2"><f>HYPERLINK(&quot;https://formula.test/x&quot;)</f></c></row></sheetData><hyperlinks><hyperlink ref="A1" r:id="rId1"/></hyperlinks></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row><c r="B2"><f>HYPERLINK(&quot;https://formula.test/x&quot;)</f></c></row></sheetData><hyperlinks><hyperlink ref="A1" r:id="rId1"/></hyperlinks></worksheet>"#,
             ),
             (
                 "xl/worksheets/_rels/sheet1.xml.rels",
@@ -1725,7 +1746,7 @@ mod tests {
         let pptx = zip(&[
             (
                 "ppt/slides/slide1.xml",
-                r#"<p:sld xmlns:p="p" xmlns:r="r"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
             ),
             (
                 "ppt/slides/_rels/slide1.xml.rels",
@@ -1752,5 +1773,40 @@ mod tests {
         let links = extract(&binary_document(DocFormat::Pptx, bytes)).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://real.test/x");
+    }
+
+    #[test]
+    fn ooxml_rejects_one_letter_namespaces_and_unqualified_relationship_ids() {
+        let pptx = zip(&[
+            (
+                "ppt/slides/slide1.xml",
+                r#"<q:sld xmlns:q="a" xmlns:s="r"><q:hlinkClick s:id="one-letter"/></q:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                r#"<Relationships><Relationship Id="one-letter" TargetMode="External" Target="https://one-letter.test/x"/></Relationships>"#,
+            ),
+        ]);
+        assert!(
+            extract(&binary_document(DocFormat::Pptx, pptx))
+                .unwrap()
+                .is_empty()
+        );
+
+        let docx = zip(&[
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:hyperlink id="unqualified"/></w:p></w:body></w:document>"#,
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships><Relationship Id="unqualified" TargetMode="External" Target="https://unqualified.test/x"/></Relationships>"#,
+            ),
+        ]);
+        assert!(
+            extract(&binary_document(DocFormat::Docx, docx))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
