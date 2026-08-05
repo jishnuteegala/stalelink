@@ -106,7 +106,7 @@ struct CommonArgs {
     /// Skip these domains (including subdomains)
     #[arg(long)]
     exclude_domain: Vec<String>,
-    /// Skip file-path, anchor, and relative-link validation
+    /// Skip file-path, anchor, mailto, tel, and relative-link validation
     #[arg(long)]
     no_local: bool,
     #[command(flatten)]
@@ -355,6 +355,7 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             .into_iter()
             .map(|domain| domain.to_ascii_lowercase())
             .collect(),
+        check_local: !args.common.no_local,
     };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

@@ -55,6 +55,14 @@ fn is_http(url: &str) -> bool {
     )
 }
 
+fn is_local_or_contact(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("mailto:") || lower.starts_with("tel:") || url.starts_with('#') {
+        return true;
+    }
+    Url::parse(url).is_err()
+}
+
 // `url` is the semantic (decoded/unescaped) link target; `span` is the exact
 // byte range of the raw source text it came from.
 fn link(doc: &SourceDocument, url: &str, span: Range<usize>) -> FoundLink {
@@ -287,7 +295,7 @@ impl Extractor for MarkdownExtractor {
                 continue;
             };
             link_ranges.push(span.clone());
-            if !is_http(&dest_url) {
+            if !is_http(&dest_url) && !is_local_or_contact(&dest_url) {
                 continue;
             }
             // Trust pulldown's decoded `dest_url` as the semantic URL a checker
@@ -350,7 +358,9 @@ impl Extractor for HtmlExtractor {
                 _ => continue,
             };
             for attribute in &tag.attributes {
-                if attribute.name() != attr || !is_http(attribute.value()) {
+                if attribute.name() != attr
+                    || (!is_http(attribute.value()) && !is_local_or_contact(attribute.value()))
+                {
                     continue;
                 }
                 let Some(index) = attribute.trace_idx() else {
@@ -406,7 +416,7 @@ impl Extractor for PdfExtractor {
                 let Some(uri) = pdf_string(uri) else {
                     continue;
                 };
-                if is_http(&uri) {
+                if is_http(&uri) || is_local_or_contact(&uri) {
                     links.push(binary_link(
                         doc,
                         &uri,
@@ -595,7 +605,7 @@ fn relationships(
                         .is_some_and(|mode| mode == "External"))
                     && let (Some(id), Some(target)) =
                         (attributes.get("Id"), attributes.get("Target"))
-                    && (!external_only || is_http(target))
+                    && (!external_only || is_http(target) || is_local_or_contact(target))
                 {
                     relationships.insert(id.clone(), target.clone());
                 }
@@ -1395,10 +1405,40 @@ mod tests {
         let text = "[a][x]\n\n[x]: /relative \"https://title.test/t\"\n";
         let doc = document(DocFormat::Markdown, text);
         let links = extract(&doc).unwrap();
-        assert!(
-            links.is_empty(),
-            "non-http destination and its title must not be reported, got {links:?}"
+        assert_eq!(
+            links.len(),
+            1,
+            "reference destination must be reported once"
         );
+        assert_eq!(links[0].url, "/relative");
+        assert!(
+            links.iter().all(|link| link.url != "https://title.test/t"),
+            "definition title URL must not be reported, got {links:?}"
+        );
+    }
+    #[test]
+    fn markdown_root_relative_reference_destinations_are_emitted() {
+        let doc = document(
+            DocFormat::Markdown,
+            "[one][root] [two][] [shortcut]\n\n[root]: /one\n[two]: /two\n[shortcut]: /three\n",
+        );
+        let links = extract(&doc).unwrap();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "/one");
+        assert_eq!(links[1].url, "/two");
+        assert_eq!(links[2].url, "/three");
+    }
+    #[test]
+    fn markdown_reference_local_destinations_are_emitted_from_shared_definition() {
+        let doc = document(
+            DocFormat::Markdown,
+            "[one][missing] [two][missing] [collapsed][] [shortcut]\n\n[missing]: absent.md\n[collapsed]: also-absent.md\n[shortcut]: shortcut-absent.md\n",
+        );
+        let links = extract(&doc).unwrap();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "absent.md");
+        assert_eq!(links[1].url, "also-absent.md");
+        assert_eq!(links[2].url, "shortcut-absent.md");
     }
     #[test]
     fn html_unquoted_mixed_case_attributes_have_valid_spans() {
