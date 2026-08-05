@@ -7,7 +7,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use lychee_lib::{Client, ClientBuilder, ErrorKind, Status, Uri, ratelimit::RateLimitConfig};
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
@@ -30,9 +29,8 @@ pub trait Checker: Send + Sync {
 }
 
 pub struct HttpChecker {
-    head: Client,
-    get: Client,
     raw: reqwest::Client,
+    retries: u8,
     per_host: usize,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
 }
@@ -42,36 +40,25 @@ impl HttpChecker {
         retries: u8,
         per_host: usize,
         user_agent: String,
-    ) -> Result<Self, ErrorKind> {
-        // lychee uses one HTTP method per client, so HEAD-first with GET
-        // fallback needs a client per method. lychee's own rate limiter cannot
-        // span the two clients, so a shared keyed semaphore enforces the
-        // per-host ceiling across both HEAD and GET phases instead.
-        let build = |method: reqwest::Method| {
-            ClientBuilder::builder()
-                .max_retries(retries)
-                .timeout(timeout)
-                .user_agent(user_agent.clone())
-                .method(method)
-                .rate_limit_config(RateLimitConfig::from_options(Some(per_host), None))
-                .build()
-                .client()
-        };
+    ) -> Result<Self, lychee_lib::ErrorKind> {
         Ok(Self {
-            head: build(reqwest::Method::HEAD)?,
-            get: build(reqwest::Method::GET)?,
             raw: reqwest::Client::builder()
                 .timeout(timeout)
                 .user_agent(user_agent)
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .map_err(ErrorKind::NetworkRequest)?,
+                .map_err(lychee_lib::ErrorKind::NetworkRequest)?,
+            retries,
             per_host,
             hosts: Mutex::new(HashMap::new()),
         })
     }
     async fn host_permit(&self, url: &Url) -> tokio::sync::OwnedSemaphorePermit {
-        let host = url.host_str().unwrap_or_default().to_owned();
+        let host = match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_owned(),
+            (None, _) => String::new(),
+        };
         let semaphore = self
             .hosts
             .lock()
@@ -84,25 +71,52 @@ impl HttpChecker {
             .await
             .expect("per-host semaphore is never closed")
     }
-    async fn status(&self, client: &Client, url: Url) -> Status {
-        let _permit = self.host_permit(&url).await;
-        match client.check(Uri::from(url)).await {
-            Ok(response) => response.into_body().status,
-            Err(kind) => Status::Error(kind),
+    async fn status(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> Result<reqwest::StatusCode, reqwest::Error> {
+        let mut current = url;
+        let mut visited = HashSet::from([current.clone()]);
+        for _ in 0..MAX_REDIRECTS {
+            let (response, permit) = self.request(method.clone(), &current).await?;
+            let status = response.status();
+            if !status.is_redirection() {
+                drop(response);
+                drop(permit);
+                return Ok(status);
+            }
+            let next = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|location| location.to_str().ok())
+                .and_then(|location| current.join(location).ok());
+            drop(response);
+            drop(permit);
+            let Some(next) = next else {
+                return Ok(status);
+            };
+            if !visited.insert(next.clone()) {
+                return Ok(reqwest::StatusCode::LOOP_DETECTED);
+            }
+            current = next;
         }
+        Ok(reqwest::StatusCode::LOOP_DETECTED)
     }
     async fn raw_get(&self, url: Url) -> Result<RawResponse, reqwest::Error> {
+        let origin = url.clone();
         let mut current = url;
         let mut redirects = Vec::new();
         let mut visited = HashSet::from([current.clone()]);
         for _ in 0..MAX_REDIRECTS {
-            let response = self.raw_request(&current).await?;
+            let (response, permit) = self.request(reqwest::Method::GET, &current).await?;
             if !response.status().is_redirection() {
                 let headers = response.headers().clone();
                 let status = response.status();
-                let body = read_body(response).await?;
+                let body = read_body(response, permit).await?;
                 return Ok(RawResponse {
                     status,
+                    origin,
                     url: current,
                     redirects,
                     headers,
@@ -111,22 +125,33 @@ impl HttpChecker {
                 });
             }
             let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                return Ok(unterminated_response(response, current, redirects));
+                return Ok(unterminated_response(
+                    response, permit, current, origin, redirects,
+                ));
             };
             let Ok(location) = location.to_str() else {
-                return Ok(unterminated_response(response, current, redirects));
+                return Ok(unterminated_response(
+                    response, permit, current, origin, redirects,
+                ));
             };
             let Ok(next) = current.join(location) else {
-                return Ok(unterminated_response(response, current, redirects));
+                return Ok(unterminated_response(
+                    response, permit, current, origin, redirects,
+                ));
             };
             redirects.push((response.status(), next.clone()));
             if !visited.insert(next.clone()) {
-                return Ok(unterminated_response(response, current, redirects));
+                return Ok(unterminated_response(
+                    response, permit, current, origin, redirects,
+                ));
             }
+            drop(response);
+            drop(permit);
             current = next;
         }
         Ok(RawResponse {
             status: reqwest::StatusCode::LOOP_DETECTED,
+            origin,
             url: current,
             redirects,
             headers: reqwest::header::HeaderMap::new(),
@@ -134,29 +159,51 @@ impl HttpChecker {
             terminated: false,
         })
     }
-    async fn raw_request(&self, url: &Url) -> Result<reqwest::Response, reqwest::Error> {
-        // Redirect targets may change hosts, so acquire exactly one permit per
-        // request and release it before following the next Location.
-        let _permit = self.host_permit(url).await;
-        self.raw.get(url.clone()).send().await
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &Url,
+    ) -> Result<(reqwest::Response, tokio::sync::OwnedSemaphorePermit), reqwest::Error> {
+        for attempt in 0..=self.retries {
+            let permit = self.host_permit(url).await;
+            match self.raw.request(method.clone(), url.clone()).send().await {
+                Ok(response)
+                    if attempt < self.retries
+                        && (response.status().is_server_error()
+                            || matches!(
+                                response.status(),
+                                reqwest::StatusCode::REQUEST_TIMEOUT
+                                    | reqwest::StatusCode::TOO_MANY_REQUESTS
+                            )) =>
+                {
+                    drop(response);
+                    drop(permit);
+                }
+                Ok(response) => return Ok((response, permit)),
+                Err(error) if attempt < self.retries && retryable_request_error(&error) => {
+                    drop(permit);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("the retry loop always returns")
     }
     async fn heuristic(&self, url: Url) -> Option<Verdict> {
         let response = self.raw_get(url.clone()).await.ok()?;
+        if !response.terminated {
+            return None;
+        }
         if login_wall(&response) {
             return Some(verdict(
                 Reason::LoginWall,
                 "redirect-chain".into(),
-                response
-                    .redirects
-                    .iter()
-                    .map(|(_, target)| target.as_str())
-                    .chain(std::iter::once(response.url.as_str()))
+                std::iter::once(response.origin.as_str())
+                    .chain(response.redirects.iter().map(|(_, target)| target.as_str()))
                     .collect::<Vec<_>>()
                     .join(" -> "),
             ));
         }
-        if response.terminated
-            && response.status.is_success()
+        if response.status.is_success()
             && response.redirects.iter().all(|(status, _)| {
                 matches!(
                     *status,
@@ -232,7 +279,7 @@ impl HttpChecker {
 impl Checker for HttpChecker {
     fn check(&self, url: Url) -> CheckFuture<'_> {
         Box::pin(async move {
-            let finding = outcome(&self.status(&self.head, url.clone()).await);
+            let finding = outcome(self.status(reqwest::Method::HEAD, url.clone()).await);
             // Retry with GET when the server signals HEAD is unsupported or
             // disallowed: 403 Forbidden, 405 Method Not Allowed, 501 Not
             // Implemented. A subsequent GET may well return 200.
@@ -240,7 +287,7 @@ impl Checker for HttpChecker {
                 finding.as_ref().map(|verdict| &verdict.reason),
                 Some(Reason::HttpStatus(403 | 405 | 501))
             ) {
-                let fallback = outcome(&self.status(&self.get, url.clone()).await);
+                let fallback = outcome(self.status(reqwest::Method::GET, url.clone()).await);
                 return if fallback.is_some() {
                     fallback
                 } else {
@@ -255,19 +302,16 @@ impl Checker for HttpChecker {
         })
     }
 }
-fn outcome(status: &Status) -> Option<Verdict> {
-    let reason = match status {
-        Status::Ok(_) | Status::Excluded => return None,
-        Status::Timeout(_) => Reason::NetworkError(NetKind::Timeout),
-        Status::Error(ErrorKind::NetworkRequest(error)) => {
-            Reason::NetworkError(network_kind(error))
-        }
-        other => match other.code() {
-            Some(code) => Reason::HttpStatus(code.as_u16()),
-            None => Reason::NetworkError(NetKind::Other),
-        },
+fn outcome(status: Result<reqwest::StatusCode, reqwest::Error>) -> Option<Verdict> {
+    let (reason, detail) = match status {
+        Ok(status) if status.is_success() => return None,
+        Ok(status) => (Reason::HttpStatus(status.as_u16()), status.to_string()),
+        Err(error) => (
+            Reason::NetworkError(network_kind(&error)),
+            error.to_string(),
+        ),
     };
-    Some(verdict(reason, "status".into(), status.to_string()))
+    Some(verdict(reason, "status".into(), detail))
 }
 fn verdict(reason: Reason, kind: String, detail: String) -> Verdict {
     Verdict {
@@ -310,6 +354,18 @@ fn network_kind(error: &reqwest::Error) -> NetKind {
         NetKind::Other
     }
 }
+fn retryable_request_error(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || (error.is_request()
+            && io_error_in_chain(error).is_some_and(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::TimedOut
+                )
+            }))
+}
 fn io_error_in_chain(error: &reqwest::Error) -> Option<&std::io::Error> {
     use std::error::Error as _;
     let mut source: Option<&(dyn std::error::Error + 'static)> = error.source();
@@ -334,6 +390,7 @@ fn error_chain(error: &reqwest::Error) -> String {
 
 struct RawResponse {
     status: reqwest::StatusCode,
+    origin: Url,
     url: Url,
     redirects: Vec<(reqwest::StatusCode, Url)>,
     headers: reqwest::header::HeaderMap,
@@ -343,20 +400,30 @@ struct RawResponse {
 
 fn unterminated_response(
     response: reqwest::Response,
+    permit: tokio::sync::OwnedSemaphorePermit,
     url: Url,
+    origin: Url,
     redirects: Vec<(reqwest::StatusCode, Url)>,
 ) -> RawResponse {
+    let status = response.status();
+    let headers = response.headers().clone();
+    drop(response);
+    drop(permit);
     RawResponse {
-        status: response.status(),
+        status,
+        origin,
         url,
         redirects,
-        headers: response.headers().clone(),
+        headers,
         body: String::new(),
         terminated: false,
     }
 }
 
-async fn read_body(mut response: reqwest::Response) -> Result<String, reqwest::Error> {
+async fn read_body(
+    mut response: reqwest::Response,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<String, reqwest::Error> {
     let mut body = Vec::with_capacity(MAX_BODY_BYTES);
     while let Some(chunk) = response.chunk().await? {
         let remaining = MAX_BODY_BYTES.saturating_sub(body.len());
@@ -365,6 +432,8 @@ async fn read_body(mut response: reqwest::Response) -> Result<String, reqwest::E
             break;
         }
     }
+    drop(response);
+    drop(permit);
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
@@ -372,26 +441,32 @@ fn login_wall(response: &RawResponse) -> bool {
     if response.redirects.is_empty() {
         return false;
     }
-    response
+    let has_auth_component = response
+        .redirects
+        .iter()
+        .map(|(_, target)| target)
+        .any(auth_component);
+    let has_return_url = response
         .redirects
         .iter()
         .map(|(_, target)| target)
         .any(|target| {
-            let path_matches = target.path_segments().is_some_and(|mut segments| {
-                segments.any(|segment| {
-                    matches!(segment.to_ascii_lowercase().as_str(), "login" | "signin")
-                })
-            });
-            let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
-            let host_matches = host
-                .split('.')
-                .any(|label| matches!(label, "auth" | "sso" | "login"));
-            path_matches
-                || target.query_pairs().any(|(key, _)| {
-                    matches!(key.to_ascii_lowercase().as_str(), "returnurl" | "redirect")
-                })
-                || host_matches
-        })
+            target
+                .query_pairs()
+                .any(|(key, _)| key.eq_ignore_ascii_case("returnurl"))
+        });
+    has_auth_component || has_return_url
+}
+
+fn auth_component(target: &Url) -> bool {
+    let path_matches = target.path_segments().is_some_and(|mut segments| {
+        segments.any(|segment| matches!(segment.to_ascii_lowercase().as_str(), "login" | "signin"))
+    });
+    let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
+    let host_matches = host
+        .split('.')
+        .any(|label| matches!(label, "auth" | "sso" | "login"));
+    path_matches || host_matches
 }
 
 fn version_upgrade(url: &Url) -> Option<Url> {
@@ -458,7 +533,7 @@ fn normalized_words(value: &str) -> std::collections::BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -536,9 +611,9 @@ mod tests {
         assert_eq!(
             verdict.evidence[0].detail,
             format!(
-                "{}/login?returnUrl=%2Fprivate -> {}/login?returnUrl=%2Fprivate",
+                "{}/private -> {}/login?returnUrl=%2Fprivate",
                 server.uri(),
-                server.uri()
+                server.uri(),
             )
         );
     }
@@ -683,19 +758,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn base_redirects_share_the_destination_host_limit() {
+        let destination = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(100)))
+            .mount(&destination)
+            .await;
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+        for server in [&first, &second] {
+            Mock::given(method("HEAD"))
+                .respond_with(
+                    ResponseTemplate::new(302)
+                        .insert_header("location", format!("{}/target", destination.uri())),
+                )
+                .mount(server)
+                .await;
+        }
+        let checker =
+            HttpChecker::new(Duration::from_secs(2), 0, 1, "stalelink-test".into()).unwrap();
+        let started = Instant::now();
+        let (first_status, second_status) = tokio::join!(
+            checker.status(
+                reqwest::Method::HEAD,
+                format!("{}/start", first.uri()).parse().unwrap()
+            ),
+            checker.status(
+                reqwest::Method::HEAD,
+                format!("{}/start", second.uri()).parse().unwrap()
+            ),
+        );
+        assert_eq!(first_status.unwrap(), reqwest::StatusCode::OK);
+        assert_eq!(second_status.unwrap(), reqwest::StatusCode::OK);
+        assert!(started.elapsed() >= Duration::from_millis(180));
+    }
+
+    #[tokio::test]
     async fn ignores_unterminated_redirect_chains() {
         let server = MockServer::start().await;
         mount(
             &server,
             "/loop",
-            ResponseTemplate::new(301).insert_header("location", "/loop"),
+            ResponseTemplate::new(301).insert_header("location", "/login"),
         )
         .await;
-        mount(&server, "/missing", ResponseTemplate::new(301)).await;
+        mount(
+            &server,
+            "/login",
+            ResponseTemplate::new(301).insert_header("location", "/login"),
+        )
+        .await;
+        mount(
+            &server,
+            "/missing",
+            ResponseTemplate::new(301).insert_header("location", "/login"),
+        )
+        .await;
         mount(
             &server,
             "/invalid",
-            ResponseTemplate::new(301).insert_header("location", "http://[invalid"),
+            ResponseTemplate::new(301).insert_header("location", "/login?returnUrl=x"),
         )
         .await;
         mount(
@@ -755,7 +877,7 @@ mod tests {
         mount(
             &server,
             "/ten",
-            ResponseTemplate::new(301).insert_header("location", "/eleven"),
+            ResponseTemplate::new(301).insert_header("location", "/login"),
         )
         .await;
         for route in ["/loop", "/missing", "/invalid", "/one"] {
@@ -796,6 +918,7 @@ mod tests {
     fn login_wall_requires_redirect_and_whole_auth_components() {
         let direct_login = RawResponse {
             status: reqwest::StatusCode::OK,
+            origin: "https://example.test/login".parse().unwrap(),
             url: "https://example.test/login".parse().unwrap(),
             redirects: vec![],
             headers: reqwest::header::HeaderMap::new(),
@@ -804,6 +927,7 @@ mod tests {
         };
         let author = RawResponse {
             status: reqwest::StatusCode::OK,
+            origin: "https://author.example/start".parse().unwrap(),
             url: "https://author.example/target".parse().unwrap(),
             redirects: vec![(
                 reqwest::StatusCode::FOUND,
@@ -815,6 +939,27 @@ mod tests {
         };
         assert!(!login_wall(&direct_login));
         assert!(!login_wall(&author));
+    }
+
+    #[test]
+    fn login_wall_ignores_bare_redirect_query_parameters() {
+        let response = RawResponse {
+            status: reqwest::StatusCode::OK,
+            origin: "https://example.test/start".parse().unwrap(),
+            url: "https://example.test/target?redirect=%2Fnext"
+                .parse()
+                .unwrap(),
+            redirects: vec![(
+                reqwest::StatusCode::FOUND,
+                "https://example.test/target?redirect=%2Fnext"
+                    .parse()
+                    .unwrap(),
+            )],
+            headers: reqwest::header::HeaderMap::new(),
+            body: String::new(),
+            terminated: true,
+        };
+        assert!(!login_wall(&response));
     }
 
     #[test]
