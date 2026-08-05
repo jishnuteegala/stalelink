@@ -1,6 +1,11 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use stalelink_core::{
     check::HttpChecker,
@@ -9,9 +14,11 @@ use stalelink_core::{
     walk::WalkOptions,
 };
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{method, path},
 };
+
+mod util;
 
 async fn serve(routes: &[(&str, u16)]) -> MockServer {
     let server = MockServer::start().await;
@@ -24,31 +31,30 @@ async fn serve(routes: &[(&str, u16)]) -> MockServer {
     server
 }
 
+struct OverlappingResponder {
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+}
+
+impl Respond for OverlappingResponder {
+    fn respond(&self, _: &Request) -> ResponseTemplate {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        let active = Arc::clone(&self.active);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            active.fetch_sub(1, Ordering::SeqCst);
+        });
+        ResponseTemplate::new(404).set_delay(Duration::from_millis(600))
+    }
+}
+
 fn scan(dir: &std::path::Path, args: &[&str]) -> assert_cmd::assert::Assert {
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command.args(["scan", "--retries", "0", "--no-cache"]);
     command.args(args);
     command.arg(dir);
     tokio::task::block_in_place(|| command.assert())
-}
-
-fn isolated(command: &mut Command) {
-    for variable in [
-        "STALELINK_NETWORK_TIMEOUT",
-        "STALELINK_NETWORK_MAX_CONCURRENCY",
-        "STALELINK_NETWORK_PER_HOST",
-        "STALELINK_NETWORK_RETRIES",
-        "STALELINK_NETWORK_USER_AGENT",
-        "STALELINK_CACHE_TTL",
-        "STALELINK_CACHE_DIR",
-        "STALELINK_IGNORE_LOCAL_LINKS",
-        "STALELINK_OUTPUT_FAIL_ON",
-        "STALELINK_AUTH_AUTH",
-        "STALELINK_AUTH_BROWSER",
-    ] {
-        command.env_remove(variable);
-    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -138,8 +144,7 @@ async fn table_has_header_when_findings_exist() {
 
 #[test]
 fn zero_concurrency_is_a_usage_error() {
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command
         .args(["scan", "--no-cache", "--max-concurrency", "0", "x.txt"])
         .assert()
@@ -179,8 +184,7 @@ async fn head_not_implemented_falls_back_to_get() {
 
 #[test]
 fn bad_exclude_url_regex_is_usage_error_even_with_missing_path() {
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command
         .args([
             "scan",
@@ -332,8 +336,7 @@ async fn cache_stats_record_a_repeat_scan_hit() {
     .unwrap();
     let mut elapsed = Vec::new();
     for _ in 0..2 {
-        let mut command = Command::cargo_bin("stalelink").unwrap();
-        isolated(&mut command);
+        let mut command = util::command();
         command.env("STALELINK_CACHE_DIR", cache.path()).args([
             "scan",
             "--retries",
@@ -346,8 +349,7 @@ async fn cache_stats_record_a_repeat_scan_hit() {
     }
     assert!(elapsed[1] + Duration::from_millis(250) < elapsed[0]);
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    let mut stats = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut stats);
+    let mut stats = util::command();
     stats
         .env("STALELINK_CACHE_DIR", cache.path())
         .args(["cache", "stats"])
@@ -372,8 +374,7 @@ async fn refresh_replaces_a_cached_clean_verdict() {
     .unwrap();
     let mut requests = Vec::new();
     for refresh in [false, false, true] {
-        let mut command = Command::cargo_bin("stalelink").unwrap();
-        isolated(&mut command);
+        let mut command = util::command();
         command.env("STALELINK_CACHE_DIR", cache.path()).args([
             "scan",
             "--retries",
@@ -417,8 +418,7 @@ async fn flags_override_environment_toml_and_defaults() {
         format!("{}/slow\n", server.uri()),
     )
     .unwrap();
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command.env("STALELINK_NETWORK_TIMEOUT", "2s").args([
         "scan",
         "--timeout",
@@ -457,8 +457,7 @@ async fn discovery_uses_first_path_and_stdin_path_before_config_resolution() {
     std::fs::write(&fast_file, format!("{}/slow", server.uri())).unwrap();
     std::fs::write(&slow_file, format!("{}/slow", server.uri())).unwrap();
     for (first, second, expected) in [(&fast_file, &slow_file, 1), (&slow_file, &fast_file, 0)] {
-        let mut command = Command::cargo_bin("stalelink").unwrap();
-        isolated(&mut command);
+        let mut command = util::command();
         command.args([
             "scan",
             "--no-cache",
@@ -467,8 +466,7 @@ async fn discovery_uses_first_path_and_stdin_path_before_config_resolution() {
         ]);
         tokio::task::block_in_place(|| command.assert()).code(expected);
     }
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command
         .args(["scan", "--no-cache", "--stdin"])
         .write_stdin(format!("{}\n", fast_file.display()));
@@ -478,8 +476,7 @@ async fn discovery_uses_first_path_and_stdin_path_before_config_resolution() {
 #[test]
 fn cache_clear_removes_the_injected_database() {
     let cache = tempfile::tempdir().unwrap();
-    let mut stats = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut stats);
+    let mut stats = util::command();
     stats
         .env("STALELINK_CACHE_DIR", cache.path())
         .args(["cache", "stats"])
@@ -487,8 +484,7 @@ fn cache_clear_removes_the_injected_database() {
         .success();
     let database = cache.path().join("verdicts.sqlite3");
     assert!(database.exists());
-    let mut clear = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut clear);
+    let mut clear = util::command();
     clear
         .env("STALELINK_CACHE_DIR", cache.path())
         .args(["cache", "clear"])
@@ -500,30 +496,53 @@ fn cache_clear_removes_the_injected_database() {
 #[tokio::test(flavor = "multi_thread")]
 async fn config_ignore_rules_exclude_files_urls_and_domains() {
     let server = serve(&[("/missing", 404)]).await;
-    let directory = tempfile::tempdir().unwrap();
+    let files = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("stalelink.toml"),
-        "[ignore]\nexclude = [\"ignored.md\"]\nexclude-url = [\"/skip\"]\nexclude-domain = [\"127.0.0.1\"]\n",
+        files.path().join("stalelink.toml"),
+        "[ignore]\nexclude = [\"ignored.md\"]\nexclude-url = [\"/skip\"]\n",
     )
     .unwrap();
     std::fs::write(
-        directory.path().join("ignored.md"),
+        files.path().join("ignored.md"),
         format!("{}/missing", server.uri()),
     )
     .unwrap();
     std::fs::write(
-        directory.path().join("note.md"),
+        files.path().join("url.md"),
         format!("{}/skip", server.uri()),
     )
     .unwrap();
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command.args([
         "scan",
         "--no-cache",
         "--retries",
         "0",
-        directory.path().to_str().unwrap(),
+        files.path().to_str().unwrap(),
+    ]);
+    tokio::task::block_in_place(|| command.assert())
+        .success()
+        .stdout("");
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    let domains = tempfile::tempdir().unwrap();
+    std::fs::write(
+        domains.path().join("stalelink.toml"),
+        "[ignore]\nexclude-domain = [\"127.0.0.1\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        domains.path().join("domain.md"),
+        format!("{}/missing", server.uri()),
+    )
+    .unwrap();
+    let mut command = util::command();
+    command.args([
+        "scan",
+        "--no-cache",
+        "--retries",
+        "0",
+        domains.path().to_str().unwrap(),
     ]);
     tokio::task::block_in_place(|| command.assert())
         .success()
@@ -532,10 +551,62 @@ async fn config_ignore_rules_exclude_files_urls_and_domains() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn environment_ignore_vectors_override_toml() {
+    for (name, value, file, url) in [
+        (
+            "STALELINK_IGNORE_EXCLUDE",
+            "ignored.md",
+            "ignored.md",
+            "/missing",
+        ),
+        ("STALELINK_IGNORE_EXCLUDE_URL", "/skip", "url.md", "/skip"),
+        (
+            "STALELINK_IGNORE_EXCLUDE_DOMAIN",
+            "127.0.0.1",
+            "domain.md",
+            "/missing",
+        ),
+    ] {
+        let server = serve(&[("/missing", 404), ("/skip", 404)]).await;
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("stalelink.toml"),
+            "[ignore]\nexclude = [\"other.md\"]\nexclude-url = [\"/other\"]\nexclude-domain = [\"example.test\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join(file),
+            format!("{}{url}", server.uri()),
+        )
+        .unwrap();
+        let mut command = util::command();
+        command.env(name, value).args([
+            "scan",
+            "--no-cache",
+            "--retries",
+            "0",
+            directory.path().to_str().unwrap(),
+        ]);
+        tokio::task::block_in_place(|| command.assert())
+            .success()
+            .stdout("");
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_scans_keep_the_wal_cache_readable() {
     let server = MockServer::start().await;
-    Mock::given(path("/"))
-        .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(600)))
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("HEAD"))
+        .respond_with(OverlappingResponder {
+            active,
+            max_active: Arc::clone(&max_active),
+        })
         .mount(&server)
         .await;
     let directory = tempfile::tempdir().unwrap();
@@ -548,23 +619,7 @@ async fn concurrent_scans_keep_the_wal_cache_readable() {
     }
     let mut children = Vec::new();
     for path in paths {
-        let binary = Command::cargo_bin("stalelink").unwrap();
-        let mut command = std::process::Command::new(binary.get_program());
-        for variable in [
-            "STALELINK_NETWORK_TIMEOUT",
-            "STALELINK_NETWORK_MAX_CONCURRENCY",
-            "STALELINK_NETWORK_PER_HOST",
-            "STALELINK_NETWORK_RETRIES",
-            "STALELINK_NETWORK_USER_AGENT",
-            "STALELINK_CACHE_TTL",
-            "STALELINK_CACHE_DIR",
-            "STALELINK_IGNORE_LOCAL_LINKS",
-            "STALELINK_OUTPUT_FAIL_ON",
-            "STALELINK_AUTH_AUTH",
-            "STALELINK_AUTH_BROWSER",
-        ] {
-            command.env_remove(variable);
-        }
+        let mut command = util::child_command();
         command.env("STALELINK_CACHE_DIR", cache.path()).args([
             "scan",
             "--retries",
@@ -580,6 +635,7 @@ async fn concurrent_scans_keep_the_wal_cache_readable() {
         );
     }
     assert!(server.received_requests().await.unwrap().len() >= 2);
+    assert!(max_active.load(Ordering::SeqCst) >= 2);
     let connection = rusqlite::Connection::open(cache.path().join("verdicts.sqlite3")).unwrap();
     assert_eq!(
         connection
@@ -596,13 +652,82 @@ async fn concurrent_scans_keep_the_wal_cache_readable() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_failures_suppress_findings_and_exit_three() {
+    let server = serve(&[("/missing", 404)]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        format!("{}/missing", server.uri()),
+    )
+    .unwrap();
+    let args = ["scan", "--retries", "0", directory.path().to_str().unwrap()];
+    let mut warm_cache = util::command();
+    warm_cache
+        .env("STALELINK_CACHE_DIR", cache.path())
+        .args(args);
+    tokio::task::block_in_place(|| warm_cache.assert()).code(1);
+    let connection = rusqlite::Connection::open(cache.path().join("verdicts.sqlite3")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_cache_statistics BEFORE UPDATE ON cache_stats BEGIN SELECT RAISE(ABORT, 'forced cache failure'); END;",
+        )
+        .unwrap();
+    let mut command = util::command();
+    command.env("STALELINK_CACHE_DIR", cache.path()).args(args);
+    tokio::task::block_in_place(|| command.assert())
+        .code(3)
+        .stdout("");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_cache_rows_are_misses_and_are_replaced() {
+    let server = serve(&[("/missing", 404)]).await;
+    let directory = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        format!("{}/missing", server.uri()),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let mut command = util::command();
+        command.env("STALELINK_CACHE_DIR", cache.path()).args([
+            "scan",
+            "--retries",
+            "0",
+            directory.path().to_str().unwrap(),
+        ]);
+        tokio::task::block_in_place(|| command.assert()).code(1);
+        if server.received_requests().await.unwrap().len() == 1 {
+            let connection =
+                rusqlite::Connection::open(cache.path().join("verdicts.sqlite3")).unwrap();
+            connection
+                .execute("UPDATE verdicts SET verdict_json = 'not json'", [])
+                .unwrap();
+        }
+    }
+    let connection = rusqlite::Connection::open(cache.path().join("verdicts.sqlite3")).unwrap();
+    let (misses, json): (u64, String) = connection
+        .query_row(
+            "SELECT cache_stats.misses, verdicts.verdict_json FROM cache_stats JOIN verdicts ON 1 = 1 WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(misses, 2);
+    assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+}
+
 #[test]
 fn no_cache_creates_no_database() {
     let directory = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "").unwrap();
-    let mut command = Command::cargo_bin("stalelink").unwrap();
-    isolated(&mut command);
+    let mut command = util::command();
     command.env("STALELINK_CACHE_DIR", cache.path()).args([
         "scan",
         "--no-cache",

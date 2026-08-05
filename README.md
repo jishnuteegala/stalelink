@@ -4,7 +4,7 @@ Scan documents for dead and outdated links.
 
 `stalelink` walks your PDFs, Word/Excel/PowerPoint files, Markdown, HTML, and plain text, extracts every link, and tells you which ones are dead, redirected, login-walled, or stale - including links behind authentication, checked with your own browser's logged-in state so they are never falsely reported dead.
 
-Fully local and open source: no telemetry, no data stored or tracked by the CLI.
+Fully local and open source: no telemetry. Network requests are made only for requested link checks; their verdicts are cached locally unless you use `--no-cache`.
 
 > Status: pre-release - under active development. The feature set below describes what is being built; the first tagged release ships the complete local feature set.
 
@@ -27,7 +27,7 @@ Explicit Markdown destinations (including resolved reference links), HTML `href`
 
 `stalelink` discovers the nearest `stalelink.toml` by walking upward from the first scan input. Positional paths come first; paths read through `--stdin` are appended, so an stdin-only scan uses its first non-empty line. Multi-path scans deliberately use the first path's configuration. `cache clear` and `cache stats` discover configuration upward from the current directory.
 
-Settings use `flags > environment > stalelink.toml > defaults` precedence. Environment names are `STALELINK_<SECTION>_<KEY>`, uppercased with hyphens changed to underscores: for example, `STALELINK_NETWORK_TIMEOUT=30s`, `STALELINK_CACHE_TTL=2h`, and `STALELINK_IGNORE_LOCAL_LINKS=true`.
+Settings use `flags > environment > stalelink.toml > defaults` precedence. Environment names map explicitly to every supported setting: `STALELINK_NETWORK_MAX_CONCURRENCY`, `STALELINK_NETWORK_PER_HOST`, `STALELINK_NETWORK_TIMEOUT`, `STALELINK_NETWORK_RETRIES`, `STALELINK_NETWORK_USER_AGENT`, `STALELINK_CACHE_TTL`, `STALELINK_CACHE_DIR`, `STALELINK_AUTH_AUTH`, `STALELINK_AUTH_BROWSER`, `STALELINK_IGNORE_LOCAL_LINKS`, `STALELINK_IGNORE_EXCLUDE`, `STALELINK_IGNORE_EXCLUDE_URL`, `STALELINK_IGNORE_EXCLUDE_DOMAIN`, `STALELINK_FIX_WRITE`, `STALELINK_FIX_BACKUP`, `STALELINK_FIX_COPY`, and `STALELINK_OUTPUT_FAIL_ON`. Vector values use comma-separated strings, for example `STALELINK_IGNORE_EXCLUDE=generated/**,vendor/**`.
 
 ```toml
 [network]
@@ -49,7 +49,7 @@ fail-on = "suspect"
 
 TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`; CLI `--timeout` is seconds, while `--cache-ttl` uses humantime. `[auth] auth` accepts `off`, `cookies`, or `browser`; `[auth] browser` accepts `auto`, `chrome`, `edge`, `brave`, `chromium`, or `firefox`. These auth settings, plus `[fix] write`, `backup`, and `copy`, are validated placeholders until their respective functionality lands.
 
-The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to remove it.
+The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to purge the local cache.
 
 ## License
 

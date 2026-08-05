@@ -6,7 +6,7 @@ use std::{
 
 use figment::{
     Figment,
-    providers::{Env, Format, Serialized, Toml},
+    providers::{Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 
@@ -164,9 +164,6 @@ pub fn resolve(scan_path: &Path) -> Result<Settings, String> {
     if let Some(path) = toml {
         figment = figment.merge(Toml::file(path));
     }
-    // STALELINK_NETWORK_TIMEOUT maps to network.timeout. Figment's default
-    // lowercase split makes the documented uppercase convention portable.
-    figment = figment.merge(Env::prefixed("STALELINK_").split("_").lowercase(true));
     let mut settings: Settings = figment.extract().map_err(|error| error.to_string())?;
     apply_env(&mut settings)?;
     validate(&settings)?;
@@ -190,51 +187,73 @@ fn validate(settings: &Settings) -> Result<(), String> {
 }
 
 fn apply_env(settings: &mut Settings) -> Result<(), String> {
-    let value = |name: &str| std::env::var(name).ok();
-    if let Some(value) = value("STALELINK_NETWORK_MAX_CONCURRENCY") {
-        settings.network.max_concurrency = value
-            .parse()
-            .map_err(|_| "invalid STALELINK_NETWORK_MAX_CONCURRENCY".to_owned())?;
-    }
-    if let Some(value) = value("STALELINK_NETWORK_PER_HOST") {
-        settings.network.per_host = value
-            .parse()
-            .map_err(|_| "invalid STALELINK_NETWORK_PER_HOST".to_owned())?;
-    }
-    if let Some(value) = value("STALELINK_NETWORK_TIMEOUT") {
-        settings.network.timeout = humantime::parse_duration(&value)
-            .map_err(|error| format!("invalid STALELINK_NETWORK_TIMEOUT: {error}"))?;
-    }
-    if let Some(value) = value("STALELINK_NETWORK_RETRIES") {
-        settings.network.retries = value
-            .parse()
-            .map_err(|_| "invalid STALELINK_NETWORK_RETRIES".to_owned())?;
-    }
-    if let Some(value) = value("STALELINK_NETWORK_USER_AGENT") {
-        settings.network.user_agent = Some(value);
-    }
-    if let Some(value) = value("STALELINK_CACHE_TTL") {
-        settings.cache.ttl = humantime::parse_duration(&value)
-            .map_err(|error| format!("invalid STALELINK_CACHE_TTL: {error}"))?;
-    }
-    if let Some(value) = value("STALELINK_CACHE_DIR") {
-        settings.cache.dir = Some(value.into());
-    }
-    if let Some(value) = value("STALELINK_IGNORE_LOCAL_LINKS") {
-        settings.ignore.local_links = value
-            .parse()
-            .map_err(|_| "invalid STALELINK_IGNORE_LOCAL_LINKS".to_owned())?;
-    }
-    if let Some(value) = value("STALELINK_OUTPUT_FAIL_ON") {
-        settings.output.fail_on = value;
-    }
-    if let Some(value) = value("STALELINK_AUTH_AUTH") {
-        settings.auth.auth = value;
-    }
-    if let Some(value) = value("STALELINK_AUTH_BROWSER") {
-        settings.auth.browser = value;
+    // This table is the complete public environment configuration surface.
+    for (name, key) in ENV_SETTINGS {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        match *key {
+            "network.max-concurrency" => settings.network.max_concurrency = parse(name, &value)?,
+            "network.per-host" => settings.network.per_host = parse(name, &value)?,
+            "network.timeout" => settings.network.timeout = parse_duration(name, &value)?,
+            "network.retries" => settings.network.retries = parse(name, &value)?,
+            "network.user-agent" => settings.network.user_agent = Some(value),
+            "cache.ttl" => settings.cache.ttl = parse_duration(name, &value)?,
+            "cache.dir" => settings.cache.dir = Some(value.into()),
+            "auth.auth" => settings.auth.auth = value,
+            "auth.browser" => settings.auth.browser = value,
+            "ignore.local-links" => settings.ignore.local_links = parse(name, &value)?,
+            "ignore.exclude" => settings.ignore.exclude = parse_list(&value),
+            "ignore.exclude-url" => settings.ignore.exclude_url = parse_list(&value),
+            "ignore.exclude-domain" => settings.ignore.exclude_domain = parse_list(&value),
+            "fix.write" => settings.fix.write = parse(name, &value)?,
+            "fix.backup" => settings.fix.backup = parse(name, &value)?,
+            "fix.copy" => settings.fix.copy = parse(name, &value)?,
+            "output.fail-on" => settings.output.fail_on = value,
+            _ => unreachable!("environment mapping must use a supported setting"),
+        }
     }
     Ok(())
+}
+
+const ENV_SETTINGS: &[(&str, &str)] = &[
+    (
+        "STALELINK_NETWORK_MAX_CONCURRENCY",
+        "network.max-concurrency",
+    ),
+    ("STALELINK_NETWORK_PER_HOST", "network.per-host"),
+    ("STALELINK_NETWORK_TIMEOUT", "network.timeout"),
+    ("STALELINK_NETWORK_RETRIES", "network.retries"),
+    ("STALELINK_NETWORK_USER_AGENT", "network.user-agent"),
+    ("STALELINK_CACHE_TTL", "cache.ttl"),
+    ("STALELINK_CACHE_DIR", "cache.dir"),
+    ("STALELINK_AUTH_AUTH", "auth.auth"),
+    ("STALELINK_AUTH_BROWSER", "auth.browser"),
+    ("STALELINK_IGNORE_LOCAL_LINKS", "ignore.local-links"),
+    ("STALELINK_IGNORE_EXCLUDE", "ignore.exclude"),
+    ("STALELINK_IGNORE_EXCLUDE_URL", "ignore.exclude-url"),
+    ("STALELINK_IGNORE_EXCLUDE_DOMAIN", "ignore.exclude-domain"),
+    ("STALELINK_FIX_WRITE", "fix.write"),
+    ("STALELINK_FIX_BACKUP", "fix.backup"),
+    ("STALELINK_FIX_COPY", "fix.copy"),
+    ("STALELINK_OUTPUT_FAIL_ON", "output.fail-on"),
+];
+
+fn parse<T: std::str::FromStr>(name: &str, value: &str) -> Result<T, String> {
+    value.parse().map_err(|_| format!("invalid {name}"))
+}
+
+fn parse_duration(name: &str, value: &str) -> Result<Duration, String> {
+    humantime::parse_duration(value).map_err(|error| format!("invalid {name}: {error}"))
+}
+
+fn parse_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn discover(scan_path: &Path) -> Result<Option<PathBuf>, String> {
