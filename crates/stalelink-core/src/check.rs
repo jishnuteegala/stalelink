@@ -1,8 +1,7 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, time::Duration};
 
 use chrono::Utc;
-use reqwest::{Client, StatusCode};
-use tokio::sync::{Mutex, Semaphore};
+use lychee_lib::{Client, ClientBuilder, ErrorKind, Status, Uri, ratelimit::RateLimitConfig};
 use url::Url;
 
 use crate::model::{Evidence, NetKind, Reason, Verdict};
@@ -13,10 +12,8 @@ pub trait Checker: Send + Sync {
 }
 
 pub struct HttpChecker {
-    client: Client,
-    retries: u8,
-    per_host: usize,
-    hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    head: Client,
+    get: Client,
 }
 impl HttpChecker {
     pub fn new(
@@ -24,75 +21,58 @@ impl HttpChecker {
         retries: u8,
         per_host: usize,
         user_agent: String,
-    ) -> Result<Self, reqwest::Error> {
-        let _lychee = lychee_lib::ClientBuilder::builder()
-            .max_retries(retries)
-            .timeout(timeout)
-            .user_agent(user_agent.clone())
-            .build()
-            .client();
-        Client::builder()
-            .timeout(timeout)
-            .user_agent(user_agent)
-            .build()
-            .map(|client| Self {
-                client,
-                retries,
-                per_host,
-                hosts: Mutex::new(HashMap::new()),
-            })
+    ) -> Result<Self, ErrorKind> {
+        // lychee uses one HTTP method per client, so HEAD-first with GET
+        // fallback needs a client per method.
+        let build = |method: reqwest::Method| {
+            ClientBuilder::builder()
+                .max_retries(retries)
+                .timeout(timeout)
+                .user_agent(user_agent.clone())
+                .method(method)
+                .rate_limit_config(RateLimitConfig::from_options(Some(per_host), None))
+                .build()
+                .client()
+        };
+        Ok(Self {
+            head: build(reqwest::Method::HEAD)?,
+            get: build(reqwest::Method::GET)?,
+        })
     }
-    async fn request(&self, url: &Url) -> Result<StatusCode, reqwest::Error> {
-        let host = url.host_str().unwrap_or_default().to_owned();
-        let semaphore = self
-            .hosts
-            .lock()
-            .await
-            .entry(host)
-            .or_insert_with(|| Arc::new(Semaphore::new(self.per_host)))
-            .clone();
-        let _permit = semaphore
-            .acquire()
-            .await
-            .expect("per-host semaphore is never closed");
-        let mut attempts = 0;
-        loop {
-            let result = async {
-                let response = self.client.head(url.clone()).send().await?;
-                if matches!(
-                    response.status(),
-                    StatusCode::METHOD_NOT_ALLOWED | StatusCode::FORBIDDEN
-                ) {
-                    Ok(self.client.get(url.clone()).send().await?.status())
-                } else {
-                    Ok(response.status())
-                }
-            }
-            .await;
-            if result.is_ok() || attempts == self.retries {
-                return result;
-            }
-            attempts += 1;
-            tokio::time::sleep(Duration::from_millis(100 * u64::from(attempts))).await;
+    async fn status(client: &Client, url: Url) -> Status {
+        match client.check(Uri::from(url)).await {
+            Ok(response) => response.into_body().status,
+            Err(kind) => Status::Error(kind),
         }
     }
 }
 impl Checker for HttpChecker {
     fn check(&self, url: Url) -> CheckFuture<'_> {
         Box::pin(async move {
-            match self.request(&url).await {
-                Ok(status) if status.is_success() => None,
-                Ok(status) => Some(verdict(
-                    Reason::HttpStatus(status.as_u16()),
-                    status.to_string(),
-                )),
-                Err(error) => Some(verdict(
-                    Reason::NetworkError(network_kind(&error)),
-                    error.to_string(),
-                )),
+            let finding = outcome(&Self::status(&self.head, url.clone()).await);
+            if matches!(
+                finding.as_ref().map(|verdict| &verdict.reason),
+                Some(Reason::HttpStatus(403 | 405))
+            ) {
+                return outcome(&Self::status(&self.get, url).await);
             }
+            finding
         })
     }
+}
+fn outcome(status: &Status) -> Option<Verdict> {
+    let reason = match status {
+        Status::Ok(_) | Status::Excluded => return None,
+        Status::Timeout(_) => Reason::NetworkError(NetKind::Timeout),
+        Status::Error(ErrorKind::NetworkRequest(error)) => {
+            Reason::NetworkError(network_kind(error))
+        }
+        other => match other.code() {
+            Some(code) => Reason::HttpStatus(code.as_u16()),
+            None => Reason::NetworkError(NetKind::Other),
+        },
+    };
+    Some(verdict(reason, status.to_string()))
 }
 fn verdict(reason: Reason, detail: String) -> Verdict {
     Verdict {

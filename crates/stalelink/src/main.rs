@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{self, Read},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     process::ExitCode,
     time::Duration,
@@ -13,7 +13,7 @@ use stalelink_core::{
     check::HttpChecker,
     model::Confidence,
     report::{ReportSink, TableSink},
-    scan::{NoProgress, ScanInput, scan},
+    scan::{NoProgress, Progress, ScanInput, scan},
     walk::{WalkOptions, detect_format},
 };
 
@@ -239,6 +239,20 @@ impl From<ConfidenceLevel> for Confidence {
     }
 }
 
+struct StderrProgress;
+impl Progress for StderrProgress {
+    fn files_walked(&self, count: usize) {
+        eprint!("\r{count} files walked");
+    }
+    fn links_found(&self, count: usize) {
+        eprint!("\r{count} links found");
+    }
+    fn checks_done(&self, count: usize) {
+        eprint!("\r{count} links checked");
+        let _ = io::stderr().flush();
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -260,7 +274,7 @@ fn run(cli: Cli) -> ExitCode {
             generate(shell, &mut command, "stalelink", &mut io::stdout());
             ExitCode::from(CLEAN)
         }
-        Command::Scan(args) => run_scan(args),
+        Command::Scan(args) => run_scan(args, cli.quiet),
         Command::Fix(_) | Command::Cache { .. } => {
             eprintln!("error: not implemented yet");
             ExitCode::from(ENVIRONMENT)
@@ -268,7 +282,7 @@ fn run(cli: Cli) -> ExitCode {
     }
 }
 
-fn run_scan(args: ScanArgs) -> ExitCode {
+fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
         eprintln!("error: not implemented yet");
         return ExitCode::from(ENVIRONMENT);
@@ -346,7 +360,16 @@ fn run_scan(args: ScanArgs) -> ExitCode {
             return ExitCode::from(ENVIRONMENT);
         }
     };
-    let mut report = match runtime.block_on(scan(input, &checker, &NoProgress)) {
+    let show_progress = !quiet && io::stderr().is_terminal();
+    let result = if show_progress {
+        runtime.block_on(scan(input, &checker, &StderrProgress))
+    } else {
+        runtime.block_on(scan(input, &checker, &NoProgress))
+    };
+    if show_progress {
+        eprintln!();
+    }
+    let mut report = match result {
         Ok(report) => report,
         Err(error) => {
             eprintln!("error: {error}");
