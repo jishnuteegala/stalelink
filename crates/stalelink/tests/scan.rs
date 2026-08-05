@@ -194,3 +194,38 @@ async fn connection_refused_reports_likely_dead() {
         .code(1)
         .stdout(predicate::str::contains("LIKELY-DEAD"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validates_local_paths_anchors_and_contact_syntax_without_network() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("guides")).unwrap();
+    std::fs::write(
+        dir.path().join("docs.md"),
+        "[missing](missing.md)\n[anchor](#no-such-anchor)\n[valid](guides/setup.md#installation)\n[bad email](mailto:not-an-address)\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("guides/setup.md"), "# Installation!\n").unwrap();
+
+    let assert = scan(dir.path(), &[]).code(1).stderr("");
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("missing.md"));
+    assert!(stdout.contains("#no-such-anchor"));
+    assert!(stdout.contains("mailto:not-an-address"));
+    assert!(!stdout.contains("guides/setup.md#installation"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_local_suppresses_local_and_contact_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("docs.md"),
+        "[missing](missing.md)\n[bad email](mailto:not-an-address)\n",
+    )
+    .unwrap();
+    scan(dir.path(), &["--no-local"])
+        .code(0)
+        .stdout("")
+        .stderr("");
+}

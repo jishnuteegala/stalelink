@@ -55,6 +55,14 @@ fn is_http(url: &str) -> bool {
     )
 }
 
+fn is_local_or_contact(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("mailto:") || lower.starts_with("tel:") || url.starts_with('#') {
+        return true;
+    }
+    Url::parse(url).is_err()
+}
+
 // `url` is the semantic (decoded/unescaped) link target; `span` is the exact
 // byte range of the raw source text it came from.
 fn link(doc: &SourceDocument, url: &str, span: Range<usize>) -> FoundLink {
@@ -287,7 +295,9 @@ impl Extractor for MarkdownExtractor {
                 continue;
             };
             link_ranges.push(span.clone());
-            if !is_http(&dest_url) {
+            if !is_http(&dest_url)
+                && (!is_local_or_contact(&dest_url) || !matches!(link_type, LinkType::Inline))
+            {
                 continue;
             }
             // Trust pulldown's decoded `dest_url` as the semantic URL a checker
@@ -350,7 +360,9 @@ impl Extractor for HtmlExtractor {
                 _ => continue,
             };
             for attribute in &tag.attributes {
-                if attribute.name() != attr || !is_http(attribute.value()) {
+                if attribute.name() != attr
+                    || (!is_http(attribute.value()) && !is_local_or_contact(attribute.value()))
+                {
                     continue;
                 }
                 let Some(index) = attribute.trace_idx() else {
@@ -406,7 +418,7 @@ impl Extractor for PdfExtractor {
                 let Some(uri) = pdf_string(uri) else {
                     continue;
                 };
-                if is_http(&uri) {
+                if is_http(&uri) || is_local_or_contact(&uri) {
                     links.push(binary_link(
                         doc,
                         &uri,
@@ -595,7 +607,7 @@ fn relationships(
                         .is_some_and(|mode| mode == "External"))
                     && let (Some(id), Some(target)) =
                         (attributes.get("Id"), attributes.get("Target"))
-                    && (!external_only || is_http(target))
+                    && (!external_only || is_http(target) || is_local_or_contact(target))
                 {
                     relationships.insert(id.clone(), target.clone());
                 }

@@ -17,6 +17,12 @@ Fully local and open source: no telemetry, no data stored or tracked by the CLI.
 - **Auto-fix:** `stalelink fix` previews link rewrites as a diff; `--write` applies them, across every supported format
 - **Performance:** parallel parsing, URL dedupe, response caching, polite per-host rate limits
 
+## Local links
+
+Explicit Markdown destinations, HTML `href`/`src` attributes, and external PDF/OOXML targets may point to local files. Relative paths resolve from the containing document; absolute/root-relative paths resolve from the filesystem root. Percent escapes in paths are decoded before lookup. Markdown headings use lowercase slugs with punctuation removed and whitespace collapsed to hyphens; Markdown and HTML also recognize `id` and `<a name>` anchors. Anchors in other existing formats are not inspected.
+
+`mailto:` requires a simple `local@domain.tld` shape. `tel:` requires at least one digit and permits only digits, `+`, `-`, parentheses, and spaces. Use `--no-local` to skip all local, mailto, and tel checks. Config-based local-link ignores are not yet implemented.
+
 ## License
 
 MIT - see [LICENSE](LICENSE)

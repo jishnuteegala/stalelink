@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use futures::{StreamExt, stream};
 use tokio::sync::Semaphore;
 use url::Url;
@@ -13,7 +14,10 @@ use url::Url;
 use crate::{
     check::Checker,
     extract::{SourceDocument, extract},
-    model::{Finding, FixOrigin, Fixability, FoundLink, SuggestedFix, Verdict},
+    model::{
+        DocFormat, Evidence, Finding, FixOrigin, Fixability, FoundLink, Reason, SuggestedFix,
+        Verdict,
+    },
     walk::{WalkOptions, detect_format, extension_format, walk},
 };
 
@@ -23,6 +27,7 @@ pub struct ScanInput {
     pub max_concurrency: usize,
     pub exclude_urls: Vec<regex::Regex>,
     pub exclude_domains: Vec<String>,
+    pub check_local: bool,
 }
 pub struct ScanReport {
     pub findings: Vec<Finding>,
@@ -60,9 +65,36 @@ pub async fn scan(
     progress.files_walked(paths.len());
     links.retain(|link| allowed(link, &input));
     progress.links_found(links.len());
+    let mut findings = Vec::new();
+    let mut local_checked = 0;
+    let mut local_unique = 0;
+    if input.check_local {
+        let mut local_links: HashMap<(PathBuf, String), Vec<FoundLink>> = HashMap::new();
+        for link in links.iter().filter(|link| is_local_or_contact(&link.url)) {
+            local_links
+                .entry((link.source.path.clone(), link.url.clone()))
+                .or_default()
+                .push(link.clone());
+        }
+        local_unique = local_links.len();
+        for (_, occurrences) in local_links {
+            local_checked += 1;
+            if let Some(verdict) = local_verdict(&occurrences[0]) {
+                findings.extend(occurrences.into_iter().map(|link| Finding {
+                    url: link.url,
+                    resolved_url: None,
+                    source: link.source,
+                    verdict: verdict.clone(),
+                    fix: None,
+                }));
+            }
+        }
+    }
     let mut grouped: HashMap<String, Vec<FoundLink>> = HashMap::new();
     for link in links {
-        grouped.entry(link.url.clone()).or_default().push(link);
+        if is_http(&link.url) {
+            grouped.entry(link.url.clone()).or_default().push(link);
+        }
     }
     let semaphore = Arc::new(Semaphore::new(input.max_concurrency));
     let unique = grouped.len();
@@ -78,8 +110,7 @@ pub async fn scan(
             }
         })
         .buffer_unordered(input.max_concurrency);
-    let mut findings = Vec::new();
-    let mut checked = 0;
+    let mut checked = local_checked;
     let mut checks = std::pin::pin!(checks);
     while let Some(result) = checks.next().await {
         let (occurrences, verdict) = result?;
@@ -99,7 +130,7 @@ pub async fn scan(
         findings,
         files_scanned: paths.len(),
         links_checked: checked,
-        links_unique: unique,
+        links_unique: unique + local_unique,
         duration: started.elapsed(),
     })
 }
@@ -123,6 +154,189 @@ fn suggested_fix(verdict: &Verdict) -> Option<SuggestedFix> {
         origin,
         fixable: Fixability::Auto,
     })
+}
+
+fn is_http(url: &str) -> bool {
+    matches!(Url::parse(url).map(|parsed| parsed.scheme().to_owned()), Ok(scheme) if scheme == "http" || scheme == "https")
+}
+
+fn is_local_or_contact(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+        || url.starts_with('#')
+        || Url::parse(url).is_err()
+}
+
+fn local_verdict(link: &FoundLink) -> Option<Verdict> {
+    let (reason, detail) = if let Some(address) = link.url.strip_prefix("mailto:") {
+        validate_mailto(address)
+            .err()
+            .map(|detail| (Reason::SyntaxInvalid, detail))?
+    } else if let Some(number) = link.url.strip_prefix("tel:") {
+        validate_tel(number)
+            .err()
+            .map(|detail| (Reason::SyntaxInvalid, detail))?
+    } else {
+        validate_local_link(link)?
+    };
+    Some(Verdict {
+        confidence: reason.confidence(),
+        reason,
+        evidence: vec![Evidence {
+            kind: "local-link".into(),
+            detail,
+        }],
+        checked_at: Utc::now(),
+        tier: 0,
+    })
+}
+
+fn validate_mailto(address: &str) -> Result<(), String> {
+    let valid = !address.is_empty()
+        && !address.contains([' ', '?', '#'])
+        && address.split('@').count() == 2
+        && address.split_once('@').is_some_and(|(local, domain)| {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        });
+    valid
+        .then_some(())
+        .ok_or_else(|| "mailto address must be a plausible addr-spec".into())
+}
+
+fn validate_tel(number: &str) -> Result<(), String> {
+    let valid = !number.is_empty()
+        && number.chars().any(|character| character.is_ascii_digit())
+        && number.chars().all(|character| {
+            character.is_ascii_digit() || matches!(character, '+' | '-' | '(' | ')' | ' ')
+        });
+    valid
+        .then_some(())
+        .ok_or_else(|| "tel number may contain only digits, +, -, parentheses, and spaces".into())
+}
+
+fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
+    let (path_part, anchor) = link
+        .url
+        .split_once('#')
+        .map_or((&*link.url, None), |(path, anchor)| (path, Some(anchor)));
+    let target = if path_part.is_empty() {
+        link.source.path.clone()
+    } else {
+        resolve_local_path(&link.source.path, path_part)
+    };
+    if !target.is_file() {
+        return Some((
+            Reason::LocalMissing,
+            format!("resolved path does not exist: {}", target.display()),
+        ));
+    }
+    let anchor = anchor?;
+    if anchor_exists(&target, anchor) {
+        None
+    } else {
+        Some((
+            Reason::LocalMissing,
+            format!("anchor not found: #{anchor} in {}", target.display()),
+        ))
+    }
+}
+
+fn resolve_local_path(source: &Path, raw_path: &str) -> PathBuf {
+    let decoded = percent_decode(raw_path);
+    let path = Path::new(&decoded);
+    if path.is_absolute() || path.has_root() {
+        path.to_path_buf()
+    } else {
+        source.parent().unwrap_or_else(|| Path::new(".")).join(path)
+    }
+}
+
+fn percent_decode(value: &str) -> String {
+    let mut bytes = Vec::with_capacity(value.len());
+    let source = value.as_bytes();
+    let mut index = 0;
+    while index < source.len() {
+        if source[index] == b'%'
+            && index + 2 < source.len()
+            && let (Some(high), Some(low)) = (hex(source[index + 1]), hex(source[index + 2]))
+        {
+            bytes.push(high * 16 + low);
+            index += 3;
+        } else {
+            bytes.push(source[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn anchor_exists(path: &Path, anchor: &str) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    match detect_format(path, &bytes) {
+        Some(DocFormat::Markdown) => markdown_anchors(text)
+            .iter()
+            .any(|candidate| candidate == anchor),
+        Some(DocFormat::Html) => html_anchors(text)
+            .iter()
+            .any(|candidate| candidate == anchor),
+        _ => true,
+    }
+}
+
+fn markdown_anchors(text: &str) -> Vec<String> {
+    let mut anchors = html_anchors(text);
+    anchors.extend(text.lines().filter_map(|line| {
+        let heading = line.trim_start().strip_prefix('#')?;
+        let heading = heading.trim_start();
+        (!heading.is_empty()).then(|| slug(heading.trim_end_matches('#').trim_end()))
+    }));
+    anchors
+}
+
+fn html_anchors(text: &str) -> Vec<String> {
+    let id =
+        regex::Regex::new(r#"(?is)\bid\s*=\s*[\"']([^\"']+)[\"']"#).expect("valid anchor regex");
+    let name = regex::Regex::new(r#"(?is)<a\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"']"#)
+        .expect("valid anchor regex");
+    id.captures_iter(text)
+        .chain(name.captures_iter(text))
+        .map(|capture| capture[1].to_owned())
+        .collect()
+}
+
+fn slug(heading: &str) -> String {
+    let mut slug = String::new();
+    let mut hyphen = false;
+    for character in heading.chars().flat_map(char::to_lowercase) {
+        if character.is_alphanumeric() || character == '_' {
+            if hyphen && !slug.is_empty() {
+                slug.push('-');
+            }
+            slug.push(character);
+            hyphen = false;
+        } else if character.is_whitespace() || character == '-' {
+            hyphen = true;
+        }
+    }
+    slug
 }
 const UNKNOWN_FILE_LIMIT: u64 = 2 * 1024 * 1024;
 
@@ -252,6 +466,7 @@ mod tests {
                 max_concurrency: 1,
                 exclude_urls: vec![],
                 exclude_domains: vec![],
+                check_local: true,
             },
             &Fake(calls.clone()),
             &NoProgress,
@@ -282,6 +497,7 @@ mod tests {
                 max_concurrency: 1,
                 exclude_urls: vec![],
                 exclude_domains: vec![],
+                check_local: true,
             },
             &Fake(calls.clone()),
             &NoProgress,
@@ -305,6 +521,7 @@ mod tests {
                 max_concurrency: 2,
                 exclude_urls: vec![],
                 exclude_domains: vec![],
+                check_local: true,
             },
             &Fake(calls.clone()),
             &NoProgress,
@@ -359,6 +576,7 @@ mod tests {
                     max_concurrency: 1,
                     exclude_urls: vec![],
                     exclude_domains: vec![],
+                    check_local: true,
                 },
                 &VerdictChecker(verdict),
                 &NoProgress,
@@ -504,6 +722,7 @@ mod tests {
                 max_concurrency: 2,
                 exclude_urls: vec![],
                 exclude_domains: vec![],
+                check_local: true,
             },
             &Fake(calls.clone()),
             &NoProgress,
@@ -592,6 +811,7 @@ mod tests {
                 max_concurrency: 1,
                 exclude_urls: vec![],
                 exclude_domains: vec![],
+                check_local: true,
             },
             &Fake(calls.clone()),
             &NoProgress,
