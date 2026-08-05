@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
@@ -233,15 +233,25 @@ fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
     let path_part = path_and_query
         .split_once('?')
         .map_or(path_and_query, |(path, _)| path);
-    let decoded_path = percent_decode(path_part).map_err(|detail| {
-        (
-            Reason::SyntaxInvalid,
-            format!("invalid percent escape in path: {detail}"),
-        )
-    });
-    let path_part = match decoded_path {
+    let path_part = match percent_decode(path_part) {
         Ok(path) => path,
-        Err(verdict) => return Some(verdict),
+        Err(detail) => {
+            return Some((
+                Reason::SyntaxInvalid,
+                format!("invalid percent escape in path: {detail}"),
+            ));
+        }
+    };
+    // Decode syntax before consulting the filesystem so malformed paths and
+    // fragments have the same verdict regardless of target state.
+    let anchor = match raw_anchor.map(percent_decode).transpose() {
+        Ok(anchor) => anchor,
+        Err(detail) => {
+            return Some((
+                Reason::SyntaxInvalid,
+                format!("invalid percent escape in fragment: {detail}"),
+            ));
+        }
     };
     let target = if path_part.is_empty() {
         link.source.path.clone()
@@ -254,7 +264,7 @@ fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
             format!("resolved path does not exist: {}", target.display()),
         ));
     }
-    let raw_anchor = raw_anchor?;
+    let anchor = anchor?;
     if target.is_dir() {
         return Some((
             Reason::LocalMissing,
@@ -264,16 +274,6 @@ fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
             ),
         ));
     }
-    // Invalid percent-encoded UTF-8 is syntax-invalid rather than lossy-decoded.
-    let anchor = match percent_decode(raw_anchor) {
-        Ok(anchor) => anchor,
-        Err(detail) => {
-            return Some((
-                Reason::SyntaxInvalid,
-                format!("invalid percent escape in fragment: {detail}"),
-            ));
-        }
-    };
     if anchor_exists(&target, &anchor) {
         None
     } else {
@@ -344,7 +344,7 @@ fn anchor_exists(path: &Path, anchor: &str) -> bool {
 
 fn markdown_anchors(text: &str) -> Vec<String> {
     let mut anchors = html_anchors(text);
-    let mut occurrences = HashMap::new();
+    let mut used = HashSet::new();
     let mut heading = None;
     for event in Parser::new(text) {
         match event {
@@ -357,13 +357,13 @@ fn markdown_anchors(text: &str) -> Vec<String> {
             Event::End(TagEnd::Heading(_)) => {
                 if let Some(heading) = heading.take() {
                     let slug = slug(&heading);
-                    let occurrence = occurrences.entry(slug.clone()).or_insert(0);
-                    let anchor = if *occurrence == 0 {
-                        slug
-                    } else {
-                        format!("{slug}-{occurrence}")
-                    };
-                    *occurrence += 1;
+                    let mut anchor = slug.clone();
+                    let mut suffix = 1;
+                    while used.contains(&anchor) {
+                        anchor = format!("{slug}-{suffix}");
+                        suffix += 1;
+                    }
+                    used.insert(anchor.clone());
                     anchors.push(anchor);
                 }
             }
@@ -395,19 +395,23 @@ fn html_anchors(text: &str) -> Vec<String> {
 
 fn slug(heading: &str) -> String {
     let mut slug = String::new();
-    let mut hyphen = false;
     for character in heading.chars().flat_map(char::to_lowercase) {
-        if character.is_alphanumeric() || character == '_' {
-            if hyphen && !slug.is_empty() {
-                slug.push('-');
-            }
+        if character.is_whitespace() {
+            slug.push('-');
+        } else if (character == '-' || character == '_')
+            || (!character.is_ascii_punctuation() && !is_combining_mark(character))
+        {
             slug.push(character);
-            hyphen = false;
-        } else if character.is_whitespace() || character == '-' {
-            hyphen = true;
         }
     }
     slug
+}
+
+fn is_combining_mark(character: char) -> bool {
+    matches!(
+        character,
+        '\u{300}'..='\u{36f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}'
+    )
 }
 const UNKNOWN_FILE_LIMIT: u64 = 2 * 1024 * 1024;
 
@@ -538,23 +542,30 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("file.md"), "<a id=\"hello world\">\n").unwrap();
         std::fs::write(directory.path().join("hash#file.md"), "# Present\n").unwrap();
+        std::fs::create_dir(directory.path().join("docs")).unwrap();
         std::fs::write(
             directory.path().join("source.md"),
-            "[query](file.md?x=1)\n[fragment](file.md?x=1#hello%20world)\n[hash](hash%23file.md#present)\n[bad](file.md#%FF)\n",
+            "[query](file.md?x=1)\n[fragment](file.md?x=1#hello%20world)\n[hash](hash%23file.md#present)\n[bad](file.md#%FF)\n[missing](missing.md#%FF)\n[directory](docs/#%FF)\n",
         )
         .unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let report = scan(input(directory.path()), &Fake(calls.clone()), &NoProgress)
             .await
             .unwrap();
-        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
-        assert_eq!(report.findings[0].url, "file.md#%FF");
-        assert_eq!(report.findings[0].verdict.reason, Reason::SyntaxInvalid);
-        assert!(
-            report.findings[0].verdict.evidence[0]
-                .detail
-                .contains("invalid UTF-8")
-        );
+        assert_eq!(report.findings.len(), 3, "{:#?}", report.findings);
+        for url in ["file.md#%FF", "missing.md#%FF", "docs/#%FF"] {
+            let finding = report
+                .findings
+                .iter()
+                .find(|finding| finding.url == url)
+                .unwrap();
+            assert_eq!(finding.verdict.reason, Reason::SyntaxInvalid);
+            assert!(
+                finding.verdict.evidence[0]
+                    .detail
+                    .contains("invalid percent escape in fragment: invalid UTF-8")
+            );
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -596,6 +607,26 @@ mod tests {
                 .findings
                 .iter()
                 .any(|finding| finding.url == "target.md#comment")
+        );
+    }
+
+    #[test]
+    fn markdown_heading_slugs_match_github_rules_and_reserve_collisions() {
+        assert_eq!(
+            markdown_anchors(
+                "# Same\n# Same-1\n# Same\n# What's & This?\n# 2024 Plan\n# Repeated   whitespace\n# !!!\n# ???\n# Rust \u{1f980} Caf\u{e9}\n"
+            ),
+            [
+                "same",
+                "same-1",
+                "same-2",
+                "whats--this",
+                "2024-plan",
+                "repeated---whitespace",
+                "",
+                "-1",
+                "rust-\u{1f980}-caf\u{e9}",
+            ]
         );
     }
 
@@ -664,6 +695,36 @@ mod tests {
         .unwrap();
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].url, "absent.md");
+        assert_eq!(report.findings[0].verdict.reason, Reason::LocalMissing);
+    }
+
+    #[tokio::test]
+    async fn root_relative_reference_links_are_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.md");
+        let filesystem_root = missing.ancestors().last().unwrap();
+        let missing = format!(
+            "/{}",
+            missing
+                .strip_prefix(filesystem_root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        std::fs::write(
+            directory.path().join("source.md"),
+            format!("[missing][target]\n\n[target]: {missing}\n"),
+        )
+        .unwrap();
+        let report = scan(
+            input(directory.path()),
+            &Fake(Arc::new(AtomicUsize::new(0))),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, missing);
         assert_eq!(report.findings[0].verdict.reason, Reason::LocalMissing);
     }
 

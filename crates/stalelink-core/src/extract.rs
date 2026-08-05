@@ -295,14 +295,7 @@ impl Extractor for MarkdownExtractor {
                 continue;
             };
             link_ranges.push(span.clone());
-            let reference_local = matches!(
-                link_type,
-                LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut
-            ) && !dest_url.starts_with('/');
-            if !is_http(&dest_url)
-                && (!is_local_or_contact(&dest_url)
-                    || (!matches!(link_type, LinkType::Inline) && !reference_local))
-            {
+            if !is_http(&dest_url) && !is_local_or_contact(&dest_url) {
                 continue;
             }
             // Trust pulldown's decoded `dest_url` as the semantic URL a checker
@@ -1412,10 +1405,28 @@ mod tests {
         let text = "[a][x]\n\n[x]: /relative \"https://title.test/t\"\n";
         let doc = document(DocFormat::Markdown, text);
         let links = extract(&doc).unwrap();
-        assert!(
-            links.is_empty(),
-            "non-http destination and its title must not be reported, got {links:?}"
+        assert_eq!(
+            links.len(),
+            1,
+            "reference destination must be reported once"
         );
+        assert_eq!(links[0].url, "/relative");
+        assert!(
+            links.iter().all(|link| link.url != "https://title.test/t"),
+            "definition title URL must not be reported, got {links:?}"
+        );
+    }
+    #[test]
+    fn markdown_root_relative_reference_destinations_are_emitted() {
+        let doc = document(
+            DocFormat::Markdown,
+            "[one][root] [two][] [shortcut]\n\n[root]: /one\n[two]: /two\n[shortcut]: /three\n",
+        );
+        let links = extract(&doc).unwrap();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "/one");
+        assert_eq!(links[1].url, "/two");
+        assert_eq!(links[2].url, "/three");
     }
     #[test]
     fn markdown_reference_local_destinations_are_emitted_from_shared_definition() {
