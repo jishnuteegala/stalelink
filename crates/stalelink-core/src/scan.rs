@@ -8,6 +8,8 @@ use std::{
 
 use chrono::Utc;
 use futures::{StreamExt, stream};
+use html5tokenizer::{NaiveParser, Token, TracingEmitter, offset::PosTrackingReader};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use tokio::sync::Semaphore;
 use url::Url;
 
@@ -161,24 +163,18 @@ fn is_http(url: &str) -> bool {
 }
 
 fn is_local_or_contact(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("mailto:")
-        || lower.starts_with("tel:")
-        || url.starts_with('#')
-        || Url::parse(url).is_err()
+    contact_scheme(url).is_some() || url.starts_with('#') || Url::parse(url).is_err()
 }
 
 fn local_verdict(link: &FoundLink) -> Option<Verdict> {
-    let (reason, detail) = if let Some(address) = link.url.strip_prefix("mailto:") {
-        validate_mailto(address)
+    let (reason, detail) = match contact_scheme(&link.url) {
+        Some(("mailto", address)) => validate_mailto(address)
             .err()
-            .map(|detail| (Reason::SyntaxInvalid, detail))?
-    } else if let Some(number) = link.url.strip_prefix("tel:") {
-        validate_tel(number)
+            .map(|detail| (Reason::SyntaxInvalid, detail))?,
+        Some(("tel", number)) => validate_tel(number)
             .err()
-            .map(|detail| (Reason::SyntaxInvalid, detail))?
-    } else {
-        validate_local_link(link)?
+            .map(|detail| (Reason::SyntaxInvalid, detail))?,
+        _ => validate_local_link(link)?,
     };
     Some(Verdict {
         confidence: reason.confidence(),
@@ -190,6 +186,17 @@ fn local_verdict(link: &FoundLink) -> Option<Verdict> {
         checked_at: Utc::now(),
         tier: 0,
     })
+}
+
+fn contact_scheme(url: &str) -> Option<(&str, &str)> {
+    let (scheme, remainder) = url.split_once(':')?;
+    if scheme.eq_ignore_ascii_case("mailto") {
+        Some(("mailto", remainder))
+    } else if scheme.eq_ignore_ascii_case("tel") {
+        Some(("tel", remainder))
+    } else {
+        None
+    }
 }
 
 fn validate_mailto(address: &str) -> Result<(), String> {
@@ -219,23 +226,55 @@ fn validate_tel(number: &str) -> Result<(), String> {
 }
 
 fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
-    let (path_part, anchor) = link
+    let (path_and_query, raw_anchor) = link
         .url
         .split_once('#')
         .map_or((&*link.url, None), |(path, anchor)| (path, Some(anchor)));
+    let path_part = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _)| path);
+    let decoded_path = percent_decode(path_part).map_err(|detail| {
+        (
+            Reason::SyntaxInvalid,
+            format!("invalid percent escape in path: {detail}"),
+        )
+    });
+    let path_part = match decoded_path {
+        Ok(path) => path,
+        Err(verdict) => return Some(verdict),
+    };
     let target = if path_part.is_empty() {
         link.source.path.clone()
     } else {
-        resolve_local_path(&link.source.path, path_part)
+        resolve_local_path(&link.source.path, &path_part)
     };
-    if !target.is_file() {
+    if !target.exists() {
         return Some((
             Reason::LocalMissing,
             format!("resolved path does not exist: {}", target.display()),
         ));
     }
-    let anchor = anchor?;
-    if anchor_exists(&target, anchor) {
+    let raw_anchor = raw_anchor?;
+    if target.is_dir() {
+        return Some((
+            Reason::LocalMissing,
+            format!(
+                "anchors cannot be checked in directory: {}",
+                target.display()
+            ),
+        ));
+    }
+    // Invalid percent-encoded UTF-8 is syntax-invalid rather than lossy-decoded.
+    let anchor = match percent_decode(raw_anchor) {
+        Ok(anchor) => anchor,
+        Err(detail) => {
+            return Some((
+                Reason::SyntaxInvalid,
+                format!("invalid percent escape in fragment: {detail}"),
+            ));
+        }
+    };
+    if anchor_exists(&target, &anchor) {
         None
     } else {
         Some((
@@ -246,8 +285,7 @@ fn validate_local_link(link: &FoundLink) -> Option<(Reason, String)> {
 }
 
 fn resolve_local_path(source: &Path, raw_path: &str) -> PathBuf {
-    let decoded = percent_decode(raw_path);
-    let path = Path::new(&decoded);
+    let path = Path::new(raw_path);
     if path.is_absolute() || path.has_root() {
         path.to_path_buf()
     } else {
@@ -255,23 +293,26 @@ fn resolve_local_path(source: &Path, raw_path: &str) -> PathBuf {
     }
 }
 
-fn percent_decode(value: &str) -> String {
+fn percent_decode(value: &str) -> Result<String, String> {
     let mut bytes = Vec::with_capacity(value.len());
     let source = value.as_bytes();
     let mut index = 0;
     while index < source.len() {
-        if source[index] == b'%'
-            && index + 2 < source.len()
-            && let (Some(high), Some(low)) = (hex(source[index + 1]), hex(source[index + 2]))
-        {
+        if source[index] == b'%' {
+            let Some((&high, &low)) = source.get(index + 1).zip(source.get(index + 2)) else {
+                return Err("incomplete escape".into());
+            };
+            let (Some(high), Some(low)) = (hex(high), hex(low)) else {
+                return Err("non-hexadecimal escape".into());
+            };
             bytes.push(high * 16 + low);
             index += 3;
-        } else {
-            bytes.push(source[index]);
-            index += 1;
+            continue;
         }
+        bytes.push(source[index]);
+        index += 1;
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8(bytes).map_err(|_| "invalid UTF-8".into())
 }
 
 fn hex(byte: u8) -> Option<u8> {
@@ -303,22 +344,52 @@ fn anchor_exists(path: &Path, anchor: &str) -> bool {
 
 fn markdown_anchors(text: &str) -> Vec<String> {
     let mut anchors = html_anchors(text);
-    anchors.extend(text.lines().filter_map(|line| {
-        let heading = line.trim_start().strip_prefix('#')?;
-        let heading = heading.trim_start();
-        (!heading.is_empty()).then(|| slug(heading.trim_end_matches('#').trim_end()))
-    }));
+    let mut occurrences = HashMap::new();
+    let mut heading = None;
+    for event in Parser::new(text) {
+        match event {
+            Event::Start(Tag::Heading { .. }) => heading = Some(String::new()),
+            Event::Text(value) | Event::Code(value) => {
+                if let Some(heading) = &mut heading {
+                    heading.push_str(&value);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(heading) = heading.take() {
+                    let slug = slug(&heading);
+                    let occurrence = occurrences.entry(slug.clone()).or_insert(0);
+                    let anchor = if *occurrence == 0 {
+                        slug
+                    } else {
+                        format!("{slug}-{occurrence}")
+                    };
+                    *occurrence += 1;
+                    anchors.push(anchor);
+                }
+            }
+            _ => {}
+        }
+    }
     anchors
 }
 
 fn html_anchors(text: &str) -> Vec<String> {
-    let id =
-        regex::Regex::new(r#"(?is)\bid\s*=\s*[\"']([^\"']+)[\"']"#).expect("valid anchor regex");
-    let name = regex::Regex::new(r#"(?is)<a\b[^>]*\bname\s*=\s*[\"']([^\"']+)[\"']"#)
-        .expect("valid anchor regex");
-    id.captures_iter(text)
-        .chain(name.captures_iter(text))
-        .map(|capture| capture[1].to_owned())
+    let parser =
+        NaiveParser::new_with_emitter(PosTrackingReader::new(text), TracingEmitter::default());
+    parser
+        .flatten()
+        .filter_map(|(token, _)| match token {
+            Token::StartTag(tag) => Some(tag),
+            _ => None,
+        })
+        .flat_map(|tag| {
+            let is_anchor = tag.name.as_str().eq_ignore_ascii_case("a");
+            tag.attributes.into_iter().filter_map(move |attribute| {
+                (attribute.name.eq_ignore_ascii_case("id")
+                    || (is_anchor && attribute.name.eq_ignore_ascii_case("name")))
+                .then(|| attribute.value.to_owned())
+            })
+        })
         .collect()
 }
 
@@ -449,6 +520,151 @@ mod tests {
             let verdict = self.0.clone();
             Box::pin(async move { Some(verdict) })
         }
+    }
+
+    fn input(path: &Path) -> ScanInput {
+        ScanInput {
+            paths: vec![path.into()],
+            walk: WalkOptions::default(),
+            max_concurrency: 1,
+            exclude_urls: vec![],
+            exclude_domains: vec![],
+            check_local: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn local_links_ignore_queries_and_decode_fragments_strictly() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("file.md"), "<a id=\"hello world\">\n").unwrap();
+        std::fs::write(directory.path().join("hash#file.md"), "# Present\n").unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[query](file.md?x=1)\n[fragment](file.md?x=1#hello%20world)\n[hash](hash%23file.md#present)\n[bad](file.md#%FF)\n",
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(input(directory.path()), &Fake(calls.clone()), &NoProgress)
+            .await
+            .unwrap();
+        assert_eq!(report.findings.len(), 1, "{:#?}", report.findings);
+        assert_eq!(report.findings[0].url, "file.md#%FF");
+        assert_eq!(report.findings[0].verdict.reason, Reason::SyntaxInvalid);
+        assert!(
+            report.findings[0].verdict.evidence[0]
+                .detail
+                .contains("invalid UTF-8")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn local_anchor_parsers_follow_rendered_markdown_and_html_structure() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("target.md"),
+            "# Same\n# Same\n# *Emphasis* and `code` [link](#same)!!!\n# Unicode cafe\u{301}\n<div data-id=\"fake\"></div><!-- <a id=\"comment\"> --><A ID=unquoted><a NaMe=\"named&amp;anchor\">\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[one](target.md#same) [two](target.md#same-1) [rendered](target.md#emphasis-and-code-link) [unicode](target.md#unicode-cafe) [unquoted](target.md#unquoted) [named](target.md#named%26anchor) [fake](target.md#fake) [comment](target.md#comment)",
+        )
+        .unwrap();
+        let report = scan(
+            input(directory.path()),
+            &Fake(Arc::new(AtomicUsize::new(0))),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 2, "{:#?}", report.findings);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.verdict.reason == Reason::LocalMissing)
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.url == "target.md#fake")
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.url == "target.md#comment")
+        );
+    }
+
+    #[tokio::test]
+    async fn uppercase_contact_schemes_are_validated_without_checker_calls() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[mail](MAILTO:valid@example.test) [tel](TEL:+1-555-0100) [bad mail](MAILTO:not-an-address) [bad tel](TEL:abc)",
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(input(directory.path()), &Fake(calls.clone()), &NoProgress)
+            .await
+            .unwrap();
+        assert_eq!(report.findings.len(), 2);
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|finding| finding.verdict.reason == Reason::SyntaxInvalid)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn fragmentless_directory_links_are_clean_but_fragmented_ones_are_not() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("docs")).unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[directory](docs/) [directory anchor](docs/#section)",
+        )
+        .unwrap();
+        let report = scan(
+            input(directory.path()),
+            &Fake(Arc::new(AtomicUsize::new(0))),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "docs/#section");
+        assert_eq!(report.findings[0].verdict.reason, Reason::LocalMissing);
+        assert!(
+            report.findings[0].verdict.evidence[0]
+                .detail
+                .contains("anchors cannot be checked in directory")
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_style_local_links_report_missing_destinations() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("source.md"),
+            "[one][missing] [two][missing]\n\n[missing]: absent.md\n",
+        )
+        .unwrap();
+        let report = scan(
+            input(directory.path()),
+            &Fake(Arc::new(AtomicUsize::new(0))),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].url, "absent.md");
+        assert_eq!(report.findings[0].verdict.reason, Reason::LocalMissing);
     }
 
     #[tokio::test]

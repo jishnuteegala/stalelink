@@ -295,8 +295,13 @@ impl Extractor for MarkdownExtractor {
                 continue;
             };
             link_ranges.push(span.clone());
+            let reference_local = matches!(
+                link_type,
+                LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut
+            ) && !dest_url.starts_with('/');
             if !is_http(&dest_url)
-                && (!is_local_or_contact(&dest_url) || !matches!(link_type, LinkType::Inline))
+                && (!is_local_or_contact(&dest_url)
+                    || (!matches!(link_type, LinkType::Inline) && !reference_local))
             {
                 continue;
             }
@@ -1411,6 +1416,18 @@ mod tests {
             links.is_empty(),
             "non-http destination and its title must not be reported, got {links:?}"
         );
+    }
+    #[test]
+    fn markdown_reference_local_destinations_are_emitted_from_shared_definition() {
+        let doc = document(
+            DocFormat::Markdown,
+            "[one][missing] [two][missing] [collapsed][] [shortcut]\n\n[missing]: absent.md\n[collapsed]: also-absent.md\n[shortcut]: shortcut-absent.md\n",
+        );
+        let links = extract(&doc).unwrap();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].url, "absent.md");
+        assert_eq!(links[1].url, "also-absent.md");
+        assert_eq!(links[2].url, "shortcut-absent.md");
     }
     #[test]
     fn html_unquoted_mixed_case_attributes_have_valid_spans() {

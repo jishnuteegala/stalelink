@@ -2,6 +2,12 @@ use std::time::Duration;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use stalelink_core::{
+    check::HttpChecker,
+    model::{Confidence, Reason},
+    scan::{NoProgress, ScanInput, scan as core_scan},
+    walk::WalkOptions,
+};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -213,6 +219,59 @@ async fn validates_local_paths_anchors_and_contact_syntax_without_network() {
     assert!(stdout.contains("#no-such-anchor"));
     assert!(stdout.contains("mailto:not-an-address"));
     assert!(!stdout.contains("guides/setup.md#installation"));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn local_validation_returns_the_expected_core_finding_contract() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("docs.md");
+    std::fs::write(
+        &source,
+        "[missing](missing.md)\n[anchor](#no-such-anchor)\n[bad email](mailto:not-an-address)\n",
+    )
+    .unwrap();
+    let checker = HttpChecker::new(Duration::from_secs(1), 0, 1, "stalelink-test".into()).unwrap();
+    let report = core_scan(
+        ScanInput {
+            paths: vec![dir.path().into()],
+            walk: WalkOptions::default(),
+            max_concurrency: 1,
+            exclude_urls: vec![],
+            exclude_domains: vec![],
+            check_local: true,
+        },
+        &checker,
+        &NoProgress,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(report.findings.len(), 3, "{:#?}", report.findings);
+    let missing = report
+        .findings
+        .iter()
+        .find(|finding| finding.url == "missing.md")
+        .unwrap();
+    assert_eq!(missing.verdict.reason, Reason::LocalMissing);
+    assert_eq!(missing.verdict.confidence, Confidence::DeadCertain);
+    assert_eq!(missing.source.path, source);
+    assert!(missing.verdict.evidence[0].detail.contains("missing.md"));
+    let anchor = report
+        .findings
+        .iter()
+        .find(|finding| finding.url == "#no-such-anchor")
+        .unwrap();
+    assert_eq!(anchor.verdict.reason, Reason::LocalMissing);
+    assert_eq!(anchor.source.path, source);
+    let email = report
+        .findings
+        .iter()
+        .find(|finding| finding.url == "mailto:not-an-address")
+        .unwrap();
+    assert_eq!(email.verdict.reason, Reason::SyntaxInvalid);
+    assert_eq!(email.source.path, source);
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
