@@ -72,9 +72,12 @@ impl Checker for HttpChecker {
         Box::pin(async move {
             let _permit = self.host_permit(&url).await;
             let finding = outcome(&Self::status(&self.head, url.clone()).await);
+            // Retry with GET when the server signals HEAD is unsupported or
+            // disallowed: 403 Forbidden, 405 Method Not Allowed, 501 Not
+            // Implemented. A subsequent GET may well return 200.
             if matches!(
                 finding.as_ref().map(|verdict| &verdict.reason),
-                Some(Reason::HttpStatus(403 | 405))
+                Some(Reason::HttpStatus(403 | 405 | 501))
             ) {
                 return outcome(&Self::status(&self.get, url).await);
             }

@@ -1,6 +1,10 @@
 use std::{ops::Range, path::PathBuf};
 
-use html5tokenizer::{NaiveParser, Token, TracingEmitter, offset::PosTrackingReader, trace::Trace};
+use html5tokenizer::{
+    NaiveParser, Token, TracingEmitter,
+    offset::PosTrackingReader,
+    trace::{AttrValueSyntax, Trace},
+};
 use linkify::{LinkFinder, LinkKind};
 use pulldown_cmark::{Event, Parser, Tag};
 use url::Url;
@@ -64,8 +68,90 @@ fn text_of(doc: &SourceDocument) -> Result<&str, ExtractError> {
 }
 
 fn locate(text: &str, needle: &str, within: &Range<usize>) -> Option<Range<usize>> {
-    let offset = text[within.clone()].find(needle)? + within.start;
+    let offset = text.get(within.clone())?.find(needle)? + within.start;
     Some(offset..offset + needle.len())
+}
+
+// A span is only usable if it is well-ordered, in bounds, and lands on UTF-8
+// boundaries; otherwise slicing the source would panic. Some HTML attribute
+// syntaxes (e.g. unquoted values) yield inverted or out-of-range traces.
+fn valid_span(text: &str, span: &Range<usize>) -> bool {
+    span.start <= span.end && text.get(span.clone()).is_some()
+}
+
+// html5tokenizer 0.5.2 leaves `value_span.end` unset (0) for unquoted attribute
+// values that run to the tag close, producing an inverted range. The start
+// offset is reliable, so recompute the end by scanning to the first
+// whitespace, `>`, or `/` when the raw span is unusable.
+fn repair_span(
+    text: &str,
+    span: Range<usize>,
+    syntax: Option<AttrValueSyntax>,
+) -> Option<Range<usize>> {
+    if valid_span(text, &span) {
+        return Some(span);
+    }
+    if syntax != Some(AttrValueSyntax::Unquoted) {
+        return None;
+    }
+    // Per the HTML tokenizer spec an unquoted value is terminated only by
+    // whitespace or `>` (a `/` is an ordinary value character, e.g. in a URL).
+    let rest = text.get(span.start..)?;
+    let len = rest
+        .find(|c: char| c.is_whitespace() || c == '>')
+        .unwrap_or(rest.len());
+    let end = span.start + len;
+    valid_span(text, &(span.start..end)).then_some(span.start..end)
+}
+
+// Locate the raw destination of a Markdown inline link inside its event span.
+// pulldown gives the whole `[label](dest)` span and a *decoded* destination, so
+// we find the `](` that opens the destination and walk to the matching close,
+// preferring the raw (possibly escaped) spelling over the decoded one.
+fn inline_dest_span(text: &str, event: &Range<usize>, dest_url: &str) -> Option<Range<usize>> {
+    let slice = text.get(event.clone())?;
+    let open = slice.rfind("](")? + 2 + event.start;
+    let rest = text.get(open..event.end)?;
+    // Destination runs up to the first unescaped whitespace (title) or the
+    // closing paren; a backslash-escaped paren/space is part of the URL.
+    let mut escaped = false;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+        } else if c == ')' || c.is_whitespace() {
+            end = Some(open + i);
+            break;
+        }
+    }
+    let end = end?;
+    let raw = text.get(open..end)?;
+    // Confirm this really is the destination: unescaping must yield dest_url.
+    if unescape_dest(raw) == dest_url {
+        Some(open..end)
+    } else {
+        None
+    }
+}
+
+// Markdown backslash-unescapes ASCII punctuation in link destinations.
+fn unescape_dest(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\'
+            && let Some(&next) = chars.as_str().as_bytes().first()
+            && next.is_ascii_punctuation()
+        {
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 impl Extractor for TextExtractor {
@@ -92,14 +178,17 @@ impl Extractor for MarkdownExtractor {
                 // destination; find the destination's own raw span within the
                 // event, preferring the raw (possibly escaped) spelling.
                 if is_http(&dest_url) {
-                    // Inline links carry the destination inside the event span.
-                    // Reference links do not: the URL text lives only at the
-                    // `[label]: url` definition, so fall back to locating it in
-                    // the whole document and dedupe uses that share it.
-                    let dest_span = locate(text, &dest_url, &span)
-                        .or_else(|| locate(text, &dest_url, &(0..text.len())))
-                        .unwrap_or(span.clone());
-                    links.push(link(doc, &dest_url, dest_span));
+                    // Inline links carry the raw destination after `](`; locate
+                    // it precisely so the span never covers the label. Reference
+                    // links do not: the URL text lives only at the `[label]: url`
+                    // definition, so fall back to the definition site elsewhere
+                    // in the document, and dedupe uses that share it. Never
+                    // substitute the whole link event as a destination span.
+                    let dest_span = inline_dest_span(text, &span, &dest_url)
+                        .or_else(|| locate(text, &dest_url, &(0..text.len())));
+                    if let Some(dest_span) = dest_span {
+                        links.push(link(doc, &dest_url, dest_span));
+                    }
                 }
             }
         }
@@ -144,7 +233,10 @@ impl Extractor for HtmlExtractor {
                 let Some(index) = attribute.trace_idx() else {
                     continue;
                 };
-                if let Some(span) = trace.attribute_traces[index].value_span() {
+                let attr_trace = &trace.attribute_traces[index];
+                if let Some(span) = attr_trace.value_span()
+                    && let Some(span) = repair_span(text, span, attr_trace.value_syntax())
+                {
                     links.push(link(doc, attribute.value(), span));
                 }
             }
@@ -295,12 +387,45 @@ mod tests {
     }
     #[test]
     fn markdown_url_label_is_not_double_counted() {
-        let doc = document(
-            DocFormat::Markdown,
-            "[https://example.test/x](https://example.test/x)",
-        );
+        let text = "[https://example.test/x](https://example.test/x)";
+        let doc = document(DocFormat::Markdown, text);
         let links = extract(&doc).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].url, "https://example.test/x");
+        // The surviving occurrence must point at the destination, not the label.
+        let span = links[0].source.byte_span.clone().unwrap();
+        let dest = text.rfind("https://example.test/x").unwrap() as u64;
+        assert_eq!(span.start, dest);
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            b"https://example.test/x"
+        );
+    }
+    #[test]
+    fn markdown_escaped_destination_span_is_raw_not_whole_link() {
+        let text = r"[x](https://example.test/a\(b\))";
+        let doc = document(DocFormat::Markdown, text);
+        let found = extract(&doc).unwrap().pop().unwrap();
+        assert_eq!(found.url, "https://example.test/a(b)");
+        let span = found.source.byte_span.clone().unwrap();
+        assert_eq!(
+            &doc.bytes[span.start as usize..span.end as usize],
+            br"https://example.test/a\(b\)"
+        );
+    }
+    #[test]
+    fn html_unquoted_mixed_case_attributes_have_valid_spans() {
+        let text = "<LINK HREF='https://a.test/x'><ScRiPt SrC=https://b.test/y></sCrIpT>";
+        let doc = document(DocFormat::Html, text);
+        let links = extract(&doc).unwrap();
+        assert_eq!(links.len(), 2);
+        for found in &links {
+            let span = found.source.byte_span.clone().unwrap();
+            assert!(span.start <= span.end);
+            assert_eq!(
+                &doc.bytes[span.start as usize..span.end as usize],
+                found.url.as_bytes()
+            );
+        }
     }
 }

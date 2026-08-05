@@ -16,11 +16,22 @@ impl<W: Write> ReportSink for TableSink<W> {
             return Ok(());
         }
         let mut findings = report.findings.clone();
+        // Deterministic order: arrival order is nondeterministic (concurrent
+        // checks over a HashMap), so tie-break past confidence and path by byte
+        // span start then URL for stable output across repeated scans.
         findings.sort_by(|a, b| {
             b.verdict
                 .confidence
                 .cmp(&a.verdict.confidence)
                 .then_with(|| a.source.path.cmp(&b.source.path))
+                .then_with(|| {
+                    a.source
+                        .byte_span
+                        .as_ref()
+                        .map(|span| span.start)
+                        .cmp(&b.source.byte_span.as_ref().map(|span| span.start))
+                })
+                .then_with(|| a.url.cmp(&b.url))
         });
         let rows: Vec<[String; 4]> = findings
             .iter()

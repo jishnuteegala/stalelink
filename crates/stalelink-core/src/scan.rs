@@ -47,21 +47,16 @@ pub async fn scan(
     if input.max_concurrency == 0 {
         return Err("max_concurrency must be at least 1".into());
     }
-    let paths = walk(&input.paths, &input.walk)?;
+    // The walk, file reads, UTF-8 decode, and parser extraction are blocking
+    // CPU/IO work; run them on a blocking thread so a large corpus cannot
+    // starve the async checking runtime (see architecture decision in #8).
+    let paths_input = input.paths.clone();
+    let walk_opts = input.walk.clone();
+    let (paths, mut links) =
+        tokio::task::spawn_blocking(move || collect_links(&paths_input, &walk_opts))
+            .await
+            .map_err(|e| e.to_string())??;
     progress.files_walked(paths.len());
-    let mut links = Vec::new();
-    for path in &paths {
-        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let format = detect_format(path).expect("walker filters formats");
-        links.extend(
-            extract(&SourceDocument {
-                path: path.clone(),
-                format,
-                bytes,
-            })
-            .map_err(|e| e.0)?,
-        );
-    }
     links.retain(|link| allowed(link, &input));
     progress.links_found(links.len());
     let mut grouped: HashMap<String, Vec<FoundLink>> = HashMap::new();
@@ -106,6 +101,26 @@ pub async fn scan(
         links_unique: unique,
         duration: started.elapsed(),
     })
+}
+fn collect_links(
+    paths_input: &[PathBuf],
+    walk_opts: &WalkOptions,
+) -> Result<(Vec<PathBuf>, Vec<FoundLink>), String> {
+    let paths = walk(paths_input, walk_opts)?;
+    let mut links = Vec::new();
+    for path in &paths {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let format = detect_format(path).expect("walker filters formats");
+        links.extend(
+            extract(&SourceDocument {
+                path: path.clone(),
+                format,
+                bytes,
+            })
+            .map_err(|e| e.0)?,
+        );
+    }
+    Ok((paths, links))
 }
 fn allowed(link: &FoundLink, input: &ScanInput) -> bool {
     if input
