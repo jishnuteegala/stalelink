@@ -70,13 +70,12 @@ fn backup_conflicts_with_copy() {
 }
 
 #[test]
-fn scan_is_not_implemented_yet() {
-    // The path is never opened; scan short-circuits before any IO.
-    let file = tempfile::NamedTempFile::new().unwrap();
+fn clean_scan_exits_zero_with_no_stdout() {
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
     Command::cargo_bin("stalelink")
         .unwrap()
         .args(["scan", file.path().to_str().unwrap()])
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("not implemented"));
+        .success()
+        .stdout("");
 }

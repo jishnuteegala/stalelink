@@ -8,6 +8,17 @@ repository.workspace = true
 [dependencies]
 chrono.workspace = true
 serde.workspace = true
+ignore.workspace = true
+linkify.workspace = true
+lol_html.workspace = true
+pulldown-cmark.workspace = true
+regex.workspace = true
+tokio.workspace = true
+url.workspace = true
+lychee-lib.workspace = true
+reqwest.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile = "3"
