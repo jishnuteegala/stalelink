@@ -20,6 +20,7 @@ unicode-width.workspace = true
 reqwest.workspace = true
 hyper.workspace = true
 futures.workspace = true
+httpdate.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -20,9 +20,10 @@ html5tokenizer = "0.5.2"
 pulldown-cmark = "0.13.4"
 unicase = "2.9"
 regex = "1.12"
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 url = "2.5"
 unicode-width = "0.2.2"
 reqwest = { version = "0.13", default-features = true }
 hyper = "1.11"
 futures = "0.3"
+httpdate = "1.0"

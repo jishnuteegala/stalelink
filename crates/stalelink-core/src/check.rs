@@ -7,6 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use httpdate::parse_http_date;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 
@@ -16,6 +17,9 @@ const SOFT_404_SIMILARITY: f64 = 0.9;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const RETRY_WAIT_TIME: Duration = Duration::from_secs(1);
+// Retry waits are capped so untrusted response headers and large retry counts
+// cannot indefinitely stall a scan or overflow Tokio's timer deadline.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const FAR_PAST: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 2);
 const STALENESS_PHRASES: &[&str] = &[
     "this page is deprecated",
@@ -409,13 +413,28 @@ fn retry_delay(response: &reqwest::Response, attempt: u8, base: Duration) -> Dur
         .headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(Duration::from_secs)
+        .and_then(|value| retry_after_delay(value, SystemTime::now()))
         .map_or(backoff, |retry_after| retry_after.max(backoff))
 }
+
+fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+        .or_else(|| parse_http_date(value).ok()?.duration_since(now).ok())
+        .map(|delay| delay.min(MAX_RETRY_DELAY))
+}
+
 fn retry_backoff(attempt: u8, base: Duration) -> Duration {
-    base.checked_mul(1_u32.checked_shl(u32::from(attempt)).unwrap_or(u32::MAX))
-        .unwrap_or(Duration::MAX)
+    let mut delay = base.min(MAX_RETRY_DELAY);
+    for _ in 0..attempt {
+        delay = delay.checked_mul(2).unwrap_or(MAX_RETRY_DELAY);
+        if delay >= MAX_RETRY_DELAY {
+            return MAX_RETRY_DELAY;
+        }
+    }
+    delay
 }
 fn host_key(url: &Url) -> String {
     match (url.host_str(), url.port_or_known_default()) {
@@ -602,11 +621,15 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        time::Duration,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use wiremock::{
-        Mock, MockServer, Respond, ResponseTemplate,
+        Mock, MockServer, ResponseTemplate,
         matchers::{method, path, path_regex},
     };
 
@@ -838,38 +861,42 @@ mod tests {
         assert_eq!(verdict.reason, Reason::StalenessBanner);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn base_redirects_share_the_destination_host_limit() {
-        struct ActiveResponder {
-            active: Arc<AtomicUsize>,
-            max_active: Arc<AtomicUsize>,
-        }
-        impl Respond for ActiveResponder {
-            fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
-                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-                self.max_active.fetch_max(active, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(100));
-                self.active.fetch_sub(1, Ordering::SeqCst);
-                ResponseTemplate::new(200)
-            }
-        }
-        let destination = MockServer::start().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = format!("http://{}", listener.local_addr().unwrap());
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
-        Mock::given(method("HEAD"))
-            .respond_with(ActiveResponder {
-                active,
-                max_active: max_active.clone(),
-            })
-            .mount(&destination)
-            .await;
+        let server = tokio::spawn({
+            let active = active.clone();
+            let max_active = max_active.clone();
+            async move {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let active = active.clone();
+                    let max_active = max_active.clone();
+                    tokio::spawn(async move {
+                        let mut request = [0; 1024];
+                        assert!(stream.read(&mut request).await.unwrap() > 0);
+                        let in_flight = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(in_flight, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
+                    });
+                }
+            }
+        });
         let first = MockServer::start().await;
         let second = MockServer::start().await;
         for server in [&first, &second] {
             Mock::given(method("HEAD"))
                 .respond_with(
                     ResponseTemplate::new(302)
-                        .insert_header("location", format!("{}/target", destination.uri())),
+                        .insert_header("location", format!("{destination}/target")),
                 )
                 .mount(server)
                 .await;
@@ -898,6 +925,7 @@ mod tests {
             second_status.unwrap(),
             StatusResult::Terminal(reqwest::StatusCode::OK)
         );
+        server.await.unwrap();
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
@@ -1119,6 +1147,15 @@ mod tests {
     }
 
     #[test]
+    fn retry_backoff_is_capped_for_large_retry_counts() {
+        assert_eq!(
+            retry_backoff(u8::MAX, Duration::from_secs(1)),
+            MAX_RETRY_DELAY
+        );
+        assert_eq!(retry_backoff(1, Duration::MAX), MAX_RETRY_DELAY);
+    }
+
+    #[test]
     fn retry_after_extends_a_rate_limit_backoff() {
         let response = reqwest::Response::from(
             hyper::http::Response::builder()
@@ -1131,6 +1168,38 @@ mod tests {
             retry_delay(&response, 0, Duration::from_secs(1)),
             Duration::from_secs(7)
         );
+    }
+
+    #[test]
+    fn retry_after_parses_and_bounds_delay_seconds() {
+        assert_eq!(
+            retry_after_delay("7", UNIX_EPOCH),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            retry_after_delay(&u64::MAX.to_string(), UNIX_EPOCH),
+            Some(MAX_RETRY_DELAY)
+        );
+    }
+
+    #[test]
+    fn retry_after_parses_future_http_dates() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let future = now + Duration::from_secs(7);
+        assert_eq!(
+            retry_after_delay(&httpdate::fmt_http_date(future), now),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn retry_after_ignores_past_and_malformed_http_dates() {
+        let now = SystemTime::now();
+        assert_eq!(
+            retry_after_delay("Wed, 01 Jan 2020 00:00:00 GMT", now),
+            None
+        );
+        assert_eq!(retry_after_delay("not a retry delay", now), None);
     }
 
     #[tokio::test]
