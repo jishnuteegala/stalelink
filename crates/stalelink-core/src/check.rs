@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::Arc,
@@ -14,6 +14,8 @@ use url::Url;
 use crate::model::{Evidence, NetKind, Reason, Verdict};
 
 const SOFT_404_SIMILARITY: f64 = 0.9;
+const MAX_BODY_BYTES: usize = 256 * 1024;
+const MAX_REDIRECTS: usize = 10;
 const FAR_PAST: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 2);
 const STALENESS_PHRASES: &[&str] = &[
     "this page is deprecated",
@@ -82,7 +84,8 @@ impl HttpChecker {
             .await
             .expect("per-host semaphore is never closed")
     }
-    async fn status(client: &Client, url: Url) -> Status {
+    async fn status(&self, client: &Client, url: Url) -> Status {
+        let _permit = self.host_permit(&url).await;
         match client.check(Uri::from(url)).await {
             Ok(response) => response.into_body().status,
             Err(kind) => Status::Error(kind),
@@ -91,50 +94,51 @@ impl HttpChecker {
     async fn raw_get(&self, url: Url) -> Result<RawResponse, reqwest::Error> {
         let mut current = url;
         let mut redirects = Vec::new();
-        for _ in 0..10 {
-            let response = self.raw.get(current.clone()).send().await?;
+        let mut visited = HashSet::from([current.clone()]);
+        for _ in 0..MAX_REDIRECTS {
+            let response = self.raw_request(&current).await?;
             if !response.status().is_redirection() {
                 let headers = response.headers().clone();
                 let status = response.status();
-                let body = response.text().await?;
+                let body = read_body(response).await?;
                 return Ok(RawResponse {
                     status,
                     url: current,
                     redirects,
                     headers,
                     body,
+                    terminated: true,
                 });
             }
             let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                break;
+                return Ok(unterminated_response(response, current, redirects));
             };
             let Ok(location) = location.to_str() else {
-                break;
+                return Ok(unterminated_response(response, current, redirects));
             };
             let Ok(next) = current.join(location) else {
-                break;
+                return Ok(unterminated_response(response, current, redirects));
             };
             redirects.push((response.status(), next.clone()));
+            if !visited.insert(next.clone()) {
+                return Ok(unterminated_response(response, current, redirects));
+            }
             current = next;
         }
-        self.raw_get_terminal(current, redirects).await
-    }
-    async fn raw_get_terminal(
-        &self,
-        url: Url,
-        redirects: Vec<(reqwest::StatusCode, Url)>,
-    ) -> Result<RawResponse, reqwest::Error> {
-        let response = self.raw.get(url.clone()).send().await?;
-        let headers = response.headers().clone();
-        let status = response.status();
-        let body = response.text().await?;
         Ok(RawResponse {
-            status,
-            url,
+            status: reqwest::StatusCode::LOOP_DETECTED,
+            url: current,
             redirects,
-            headers,
-            body,
+            headers: reqwest::header::HeaderMap::new(),
+            body: String::new(),
+            terminated: false,
         })
+    }
+    async fn raw_request(&self, url: &Url) -> Result<reqwest::Response, reqwest::Error> {
+        // Redirect targets may change hosts, so acquire exactly one permit per
+        // request and release it before following the next Location.
+        let _permit = self.host_permit(url).await;
+        self.raw.get(url.clone()).send().await
     }
     async fn heuristic(&self, url: Url) -> Option<Verdict> {
         let response = self.raw_get(url.clone()).await.ok()?;
@@ -151,12 +155,16 @@ impl HttpChecker {
                     .join(" -> "),
             ));
         }
-        if response.redirects.iter().all(|(status, _)| {
-            matches!(
-                *status,
-                reqwest::StatusCode::MOVED_PERMANENTLY | reqwest::StatusCode::PERMANENT_REDIRECT
-            )
-        }) && !response.redirects.is_empty()
+        if response.terminated
+            && response.status.is_success()
+            && response.redirects.iter().all(|(status, _)| {
+                matches!(
+                    *status,
+                    reqwest::StatusCode::MOVED_PERMANENTLY
+                        | reqwest::StatusCode::PERMANENT_REDIRECT
+                )
+            })
+            && !response.redirects.is_empty()
         {
             return Some(verdict(
                 Reason::PermanentRedirect,
@@ -224,8 +232,7 @@ impl HttpChecker {
 impl Checker for HttpChecker {
     fn check(&self, url: Url) -> CheckFuture<'_> {
         Box::pin(async move {
-            let _permit = self.host_permit(&url).await;
-            let finding = outcome(&Self::status(&self.head, url.clone()).await);
+            let finding = outcome(&self.status(&self.head, url.clone()).await);
             // Retry with GET when the server signals HEAD is unsupported or
             // disallowed: 403 Forbidden, 405 Method Not Allowed, 501 Not
             // Implemented. A subsequent GET may well return 200.
@@ -233,7 +240,12 @@ impl Checker for HttpChecker {
                 finding.as_ref().map(|verdict| &verdict.reason),
                 Some(Reason::HttpStatus(403 | 405 | 501))
             ) {
-                return outcome(&Self::status(&self.get, url).await);
+                let fallback = outcome(&self.status(&self.get, url.clone()).await);
+                return if fallback.is_some() {
+                    fallback
+                } else {
+                    self.heuristic(url).await
+                };
             }
             if finding.is_some() {
                 finding
@@ -326,25 +338,59 @@ struct RawResponse {
     redirects: Vec<(reqwest::StatusCode, Url)>,
     headers: reqwest::header::HeaderMap,
     body: String,
+    terminated: bool,
+}
+
+fn unterminated_response(
+    response: reqwest::Response,
+    url: Url,
+    redirects: Vec<(reqwest::StatusCode, Url)>,
+) -> RawResponse {
+    RawResponse {
+        status: response.status(),
+        url,
+        redirects,
+        headers: response.headers().clone(),
+        body: String::new(),
+        terminated: false,
+    }
+}
+
+async fn read_body(mut response: reqwest::Response) -> Result<String, reqwest::Error> {
+    let mut body = Vec::with_capacity(MAX_BODY_BYTES);
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = MAX_BODY_BYTES.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() == MAX_BODY_BYTES {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 fn login_wall(response: &RawResponse) -> bool {
+    if response.redirects.is_empty() {
+        return false;
+    }
     response
         .redirects
         .iter()
         .map(|(_, target)| target)
-        .chain(std::iter::once(&response.url))
         .any(|target| {
-            let path = target.path().to_ascii_lowercase();
+            let path_matches = target.path_segments().is_some_and(|mut segments| {
+                segments.any(|segment| {
+                    matches!(segment.to_ascii_lowercase().as_str(), "login" | "signin")
+                })
+            });
             let host = target.host_str().unwrap_or_default().to_ascii_lowercase();
-            path.contains("/login")
-                || path.contains("/signin")
+            let host_matches = host
+                .split('.')
+                .any(|label| matches!(label, "auth" | "sso" | "login"));
+            path_matches
                 || target.query_pairs().any(|(key, _)| {
                     matches!(key.to_ascii_lowercase().as_str(), "returnurl" | "redirect")
                 })
-                || host.contains("auth")
-                || host.contains("sso")
-                || host.contains("login")
+                || host_matches
         })
 }
 
@@ -352,22 +398,21 @@ fn version_upgrade(url: &Url) -> Option<Url> {
     let mut upgraded = url.clone();
     let segments = url.path_segments()?.collect::<Vec<_>>();
     let mut replacement = None;
-    for segment in &segments {
+    for (index, segment) in segments.iter().enumerate() {
         if let Some(version) = segment.strip_prefix('v')
             && let Ok(version) = version.parse::<u32>()
+            && let Some(next) = version.checked_add(1)
         {
-            replacement = Some(format!("v{}", version + 1));
+            replacement = Some((index, format!("v{next}")));
             break;
         }
     }
-    let replacement = replacement?;
+    let (index, replacement) = replacement?;
     let path = segments
         .iter()
-        .map(|segment| {
-            if segment
-                .strip_prefix('v')
-                .is_some_and(|version| version.parse::<u32>().is_ok())
-            {
+        .enumerate()
+        .map(|(segment_index, segment)| {
+            if segment_index == index {
                 replacement.as_str()
             } else {
                 segment
@@ -417,7 +462,7 @@ mod tests {
 
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{path, path_regex},
+        matchers::{method, path, path_regex},
     };
 
     use super::*;
@@ -457,6 +502,12 @@ mod tests {
         assert_eq!(verdict.reason, Reason::Soft404);
         assert_eq!(verdict.confidence, Confidence::LikelyDead);
         assert_eq!(verdict.evidence[0].kind, "sibling-similarity");
+        assert!(
+            verdict.evidence[0]
+                .detail
+                .starts_with(&format!("{}/docs/", server.uri()))
+        );
+        assert!(verdict.evidence[0].detail.ends_with("(1.00)"));
     }
 
     #[tokio::test]
@@ -482,6 +533,14 @@ mod tests {
         assert_eq!(verdict.reason, Reason::LoginWall);
         assert_eq!(verdict.confidence, Confidence::AuthWalled);
         assert_eq!(verdict.evidence[0].kind, "redirect-chain");
+        assert_eq!(
+            verdict.evidence[0].detail,
+            format!(
+                "{}/login?returnUrl=%2Fprivate -> {}/login?returnUrl=%2Fprivate",
+                server.uri(),
+                server.uri()
+            )
+        );
     }
 
     #[tokio::test]
@@ -600,5 +659,178 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn runs_heuristics_after_a_clean_get_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/deprecated"))
+            .respond_with(ResponseTemplate::new(405))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/deprecated"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("This page is deprecated."))
+            .mount(&server)
+            .await;
+        let verdict = checker()
+            .await
+            .check(format!("{}/deprecated", server.uri()).parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(verdict.reason, Reason::StalenessBanner);
+    }
+
+    #[tokio::test]
+    async fn ignores_unterminated_redirect_chains() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/loop",
+            ResponseTemplate::new(301).insert_header("location", "/loop"),
+        )
+        .await;
+        mount(&server, "/missing", ResponseTemplate::new(301)).await;
+        mount(
+            &server,
+            "/invalid",
+            ResponseTemplate::new(301).insert_header("location", "http://[invalid"),
+        )
+        .await;
+        mount(
+            &server,
+            "/one",
+            ResponseTemplate::new(301).insert_header("location", "/two"),
+        )
+        .await;
+        mount(
+            &server,
+            "/two",
+            ResponseTemplate::new(301).insert_header("location", "/three"),
+        )
+        .await;
+        mount(
+            &server,
+            "/three",
+            ResponseTemplate::new(301).insert_header("location", "/four"),
+        )
+        .await;
+        mount(
+            &server,
+            "/four",
+            ResponseTemplate::new(301).insert_header("location", "/five"),
+        )
+        .await;
+        mount(
+            &server,
+            "/five",
+            ResponseTemplate::new(301).insert_header("location", "/six"),
+        )
+        .await;
+        mount(
+            &server,
+            "/six",
+            ResponseTemplate::new(301).insert_header("location", "/seven"),
+        )
+        .await;
+        mount(
+            &server,
+            "/seven",
+            ResponseTemplate::new(301).insert_header("location", "/eight"),
+        )
+        .await;
+        mount(
+            &server,
+            "/eight",
+            ResponseTemplate::new(301).insert_header("location", "/nine"),
+        )
+        .await;
+        mount(
+            &server,
+            "/nine",
+            ResponseTemplate::new(301).insert_header("location", "/ten"),
+        )
+        .await;
+        mount(
+            &server,
+            "/ten",
+            ResponseTemplate::new(301).insert_header("location", "/eleven"),
+        )
+        .await;
+        for route in ["/loop", "/missing", "/invalid", "/one"] {
+            assert!(
+                checker()
+                    .await
+                    .heuristic(format!("{}{route}", server.uri()).parse().unwrap())
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn limits_buffered_response_bodies() {
+        let server = MockServer::start().await;
+        let body = format!("{}This page is deprecated.", "x".repeat(MAX_BODY_BYTES));
+        mount(
+            &server,
+            "/large",
+            ResponseTemplate::new(200).set_body_string(body),
+        )
+        .await;
+        Mock::given(path_regex("/stalelink-probe-.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        assert!(
+            checker()
+                .await
+                .check(format!("{}/large", server.uri()).parse().unwrap())
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn login_wall_requires_redirect_and_whole_auth_components() {
+        let direct_login = RawResponse {
+            status: reqwest::StatusCode::OK,
+            url: "https://example.test/login".parse().unwrap(),
+            redirects: vec![],
+            headers: reqwest::header::HeaderMap::new(),
+            body: String::new(),
+            terminated: true,
+        };
+        let author = RawResponse {
+            status: reqwest::StatusCode::OK,
+            url: "https://author.example/target".parse().unwrap(),
+            redirects: vec![(
+                reqwest::StatusCode::FOUND,
+                "https://author.example/target".parse().unwrap(),
+            )],
+            headers: reqwest::header::HeaderMap::new(),
+            body: String::new(),
+            terminated: true,
+        };
+        assert!(!login_wall(&direct_login));
+        assert!(!login_wall(&author));
+    }
+
+    #[test]
+    fn version_upgrade_changes_only_the_first_segment_without_overflowing() {
+        assert_eq!(
+            version_upgrade(&"https://example.test/v9/".parse().unwrap())
+                .unwrap()
+                .path(),
+            "/v10/"
+        );
+        assert_eq!(
+            version_upgrade(&"https://example.test/v1/archive/v9/item".parse().unwrap())
+                .unwrap()
+                .path(),
+            "/v2/archive/v9/item"
+        );
+        assert!(version_upgrade(&"https://example.test/v4294967295/".parse().unwrap()).is_none());
     }
 }
