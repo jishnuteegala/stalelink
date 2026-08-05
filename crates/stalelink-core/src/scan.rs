@@ -12,7 +12,7 @@ use url::Url;
 use crate::{
     check::Checker,
     extract::{SourceDocument, extract},
-    model::{Finding, FoundLink},
+    model::{Finding, FixOrigin, Fixability, FoundLink, SuggestedFix, Verdict},
     walk::{WalkOptions, detect_format, walk},
 };
 
@@ -90,7 +90,7 @@ pub async fn scan(
                 resolved_url: None,
                 source: link.source,
                 verdict: verdict.clone(),
-                fix: None,
+                fix: suggested_fix(&verdict),
             }));
         }
     }
@@ -100,6 +100,24 @@ pub async fn scan(
         links_checked: checked,
         links_unique: unique,
         duration: started.elapsed(),
+    })
+}
+fn suggested_fix(verdict: &Verdict) -> Option<SuggestedFix> {
+    let (kind, origin) = match verdict.reason {
+        crate::model::Reason::PermanentRedirect => ("redirect-target", FixOrigin::RedirectTarget),
+        crate::model::Reason::VersionDrift => ("version-upgrade", FixOrigin::VersionUpgrade),
+        _ => return None,
+    };
+    let replacement_url = verdict
+        .evidence
+        .iter()
+        .find(|evidence| evidence.kind == kind)?
+        .detail
+        .clone();
+    Some(SuggestedFix {
+        replacement_url,
+        origin,
+        fixable: Fixability::Auto,
     })
 }
 fn collect_links(
@@ -194,5 +212,37 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(report.findings.len(), 2);
         assert_eq!(report.links_unique, 1);
+    }
+
+    #[test]
+    fn redirects_and_version_upgrades_create_automatic_fixes() {
+        let redirect = Verdict {
+            confidence: Confidence::Outdated,
+            reason: Reason::PermanentRedirect,
+            evidence: vec![Evidence {
+                kind: "redirect-target".into(),
+                detail: "https://example.test/current".into(),
+            }],
+            checked_at: Utc::now(),
+            tier: 1,
+        };
+        let version = Verdict {
+            confidence: Confidence::Outdated,
+            reason: Reason::VersionDrift,
+            evidence: vec![Evidence {
+                kind: "version-upgrade".into(),
+                detail: "https://example.test/v2/items".into(),
+            }],
+            checked_at: Utc::now(),
+            tier: 1,
+        };
+        assert_eq!(
+            suggested_fix(&redirect).unwrap().origin,
+            FixOrigin::RedirectTarget
+        );
+        assert_eq!(
+            suggested_fix(&version).unwrap().origin,
+            FixOrigin::VersionUpgrade
+        );
     }
 }

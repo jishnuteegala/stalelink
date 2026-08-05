@@ -3311,6 +3311,7 @@ dependencies = [
  "unicase",
  "unicode-width",
  "url",
+ "wiremock",
 ]
 
 [[package]]
