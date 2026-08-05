@@ -21,6 +21,9 @@ reqwest.workspace = true
 hyper.workspace = true
 futures.workspace = true
 httpdate.workspace = true
+lopdf.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

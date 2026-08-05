@@ -14,7 +14,7 @@ use stalelink_core::{
     model::Confidence,
     report::{ReportSink, TableSink},
     scan::{NoProgress, Progress, ScanInput, scan},
-    walk::{WalkOptions, detect_format},
+    walk::WalkOptions,
 };
 
 const CLEAN: u8 = 0;
@@ -324,9 +324,6 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         if !path.exists() {
             eprintln!("error: path does not exist: {}", path.display());
             return ExitCode::from(ENVIRONMENT);
-        }
-        if path.is_file() && detect_format(path).is_none() {
-            eprintln!("warning: unsupported file format: {}", path.display());
         }
     }
     let checker = match HttpChecker::new(

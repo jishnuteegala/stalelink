@@ -131,7 +131,7 @@ fn collect_links(
     let mut links = Vec::new();
     for path in &paths {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let format = detect_format(path).expect("walker filters formats");
+        let format = detect_format(path, &bytes);
         links.extend(
             extract(&SourceDocument {
                 path: path.clone(),
@@ -170,6 +170,7 @@ mod tests {
         model::{Confidence, Evidence, Reason, Verdict},
     };
     use chrono::Utc;
+    use std::io::Write;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -311,5 +312,122 @@ mod tests {
             tier: 1,
         };
         assert!(suggested_fix(&no_fix).is_none());
+    }
+
+    #[tokio::test]
+    async fn mixed_corpus_scan_handles_all_document_formats() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, contents) in [
+            ("one.md", "[x](https://mixed.test/markdown)"),
+            ("two.html", "<a href=\"https://mixed.test/html\">x</a>"),
+            ("three.txt", "https://mixed.test/text"),
+        ] {
+            std::fs::write(directory.path().join(name), contents).unwrap();
+        }
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:instrText>HYPERLINK &quot;https://mixed.test/docx&quot;</w:instrText></w:r></w:p></w:body></w:document>"#).unwrap();
+        zip.start_file(
+            "word/_rels/document.xml.rels",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"<Relationships/>").unwrap();
+        let docx = zip.finish().unwrap().into_inner();
+        std::fs::write(directory.path().join("four.bin"), docx).unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, xml) in [
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns:r="r"><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><sheetData><row><c r="A1"><f>HYPERLINK(&quot;https://mixed.test/xlsx&quot;)</f></c></row></sheetData></worksheet>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        std::fs::write(
+            directory.path().join("five.wrong"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, xml) in [
+            (
+                "ppt/slides/slide1.xml",
+                r#"<p:sld xmlns:p="p" xmlns:r="r"><p:cNvPr><a:hlinkClick r:id="rId1"/></p:cNvPr></p:sld>"#,
+            ),
+            (
+                "ppt/slides/_rels/slide1.xml.rels",
+                r#"<Relationships><Relationship Id="rId1" TargetMode="External" Target="https://mixed.test/pptx"/></Relationships>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        std::fs::write(
+            directory.path().join("six.pptx"),
+            zip.finish().unwrap().into_inner(),
+        )
+        .unwrap();
+        let stream = "BT /F1 12 Tf 72 720 Td (https://mixed.test/pdf) Tj ET\n";
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{stream}endstream", stream.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0];
+        for (number, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", number + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets.iter().skip(1) {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        std::fs::write(directory.path().join("seven.txt"), pdf).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let report = scan(
+            ScanInput {
+                paths: vec![directory.path().into()],
+                walk: WalkOptions::default(),
+                max_concurrency: 2,
+                exclude_urls: vec![],
+                exclude_domains: vec![],
+            },
+            &Fake(calls.clone()),
+            &NoProgress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.files_scanned, 7);
+        assert_eq!(report.findings.len(), 7, "{:#?}", report.findings);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 }
