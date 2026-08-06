@@ -1,4 +1,7 @@
-use std::ops::Range;
+use std::{
+    io::{Cursor, Read, Write},
+    ops::Range,
+};
 
 use crate::{
     extract::{SourceDocument, extract},
@@ -57,6 +60,233 @@ impl Fixer for TextFixer {
 }
 
 pub struct HtmlFixer;
+
+pub struct OoxmlFixer;
+pub struct PdfFixer;
+
+impl Fixer for OoxmlFixer {
+    fn fix(&self, original: &[u8], findings: &[Finding]) -> Result<Vec<u8>, FixError> {
+        let replacements = replacements(findings)?;
+        let mut source = zip::ZipArchive::new(Cursor::new(original))
+            .map_err(|error| FixError(format!("reading OOXML archive: {error}")))?;
+        let mut changed = vec![false; replacements.len()];
+        let mut touched = std::collections::HashMap::new();
+        for index in 0..source.len() {
+            let mut entry = source
+                .by_index(index)
+                .map_err(|error| FixError(format!("reading OOXML entry: {error}")))?;
+            let name = entry.name().to_owned();
+            if !is_ooxml_link_part(&name) {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|error| FixError(format!("reading OOXML entry {name}: {error}")))?;
+            let fixed = replace_urls(&name, &bytes, &replacements, &mut changed);
+            if fixed != bytes {
+                touched.insert(name, fixed);
+            }
+        }
+        for (index, (old, _)) in replacements.iter().enumerate() {
+            if !changed[index] {
+                return Err(FixError(format!(
+                    "{old} was not found in an OOXML link part"
+                )));
+            }
+        }
+        let mut source = zip::ZipArchive::new(Cursor::new(original))
+            .map_err(|error| FixError(format!("reading OOXML archive: {error}")))?;
+        let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for index in 0..source.len() {
+            let entry = source
+                .by_index(index)
+                .map_err(|error| FixError(format!("reading OOXML entry: {error}")))?;
+            let name = entry.name().to_owned();
+            if let Some(fixed) = touched.get(&name) {
+                output
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .map_err(|error| FixError(format!("writing OOXML entry: {error}")))?;
+                output
+                    .write_all(fixed)
+                    .map_err(|error| FixError(format!("writing OOXML entry: {error}")))?;
+            } else {
+                // Raw-copy preserves the original member's compressed bytes and metadata.
+                output
+                    .raw_copy_file(entry)
+                    .map_err(|error| FixError(format!("copying OOXML entry {name}: {error}")))?;
+            }
+        }
+        output
+            .finish()
+            .map(|cursor| cursor.into_inner())
+            .map_err(|error| FixError(format!("finishing OOXML archive: {error}")))
+    }
+}
+
+impl Fixer for PdfFixer {
+    fn fix(&self, original: &[u8], findings: &[Finding]) -> Result<Vec<u8>, FixError> {
+        if findings.iter().any(|finding| {
+            matches!(
+                finding.source.location,
+                crate::model::Location::Pdf {
+                    annotation: None,
+                    ..
+                }
+            )
+        }) {
+            return Err(FixError("bare PDF text URLs require manual editing".into()));
+        }
+        let document = lopdf::Document::load_mem(original)
+            .map_err(|error| FixError(format!("reading PDF: {error}")))?;
+        if document.is_encrypted() {
+            return Err(FixError("encrypted PDF files are not modified".into()));
+        }
+        if signed_pdf(&document) {
+            return Err(FixError("signed PDF files are not modified".into()));
+        }
+        let annotation_ids = document
+            .objects
+            .iter()
+            .filter_map(|(id, object)| {
+                let dict = object.as_dict().ok()?;
+                (dict.get(b"Subtype").ok()?.as_name().ok()? == b"Link").then_some(*id)
+            })
+            .collect::<Vec<_>>();
+        let replacements = replacements(findings)?;
+        let mut incremental = lopdf::IncrementalDocument::create_from(original.to_vec(), document);
+        let mut changed = vec![false; replacements.len()];
+        for annotation_id in annotation_ids {
+            incremental
+                .opt_clone_object_to_new_document(annotation_id)
+                .map_err(|error| FixError(format!("cloning PDF annotation: {error}")))?;
+            let action_id = incremental
+                .new_document
+                .get_object(annotation_id)
+                .and_then(lopdf::Object::as_dict)
+                .ok()
+                .and_then(|annotation| annotation.get(b"A").ok())
+                .and_then(|action| action.as_reference().ok());
+            if let Some(action_id) = action_id {
+                incremental
+                    .opt_clone_object_to_new_document(action_id)
+                    .map_err(|error| FixError(format!("cloning PDF action: {error}")))?;
+            }
+            let action = if let Some(action_id) = action_id {
+                incremental
+                    .new_document
+                    .get_object_mut(action_id)
+                    .and_then(lopdf::Object::as_dict_mut)
+            } else {
+                incremental
+                    .new_document
+                    .get_object_mut(annotation_id)
+                    .and_then(lopdf::Object::as_dict_mut)
+                    .and_then(|annotation| annotation.get_mut(b"A"))
+                    .and_then(lopdf::Object::as_dict_mut)
+            }
+            .map_err(|error| FixError(format!("reading PDF action: {error}")))?;
+            if !action
+                .get(b"S")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|name| name == b"URI")
+            {
+                continue;
+            }
+            let Ok(uri) = action.get_mut(b"URI").and_then(lopdf::Object::as_str_mut) else {
+                continue;
+            };
+            for (index, (old, replacement)) in replacements.iter().enumerate() {
+                if uri.as_slice() == old.as_bytes() {
+                    *uri = replacement.as_bytes().to_vec();
+                    changed[index] = true;
+                }
+            }
+        }
+        for (index, (old, _)) in replacements.iter().enumerate() {
+            if !changed[index] {
+                return Err(FixError(format!(
+                    "{old} was not found in a PDF annotation URI"
+                )));
+            }
+        }
+        let mut fixed = Vec::new();
+        incremental
+            .save_to(&mut fixed)
+            .map_err(|error| FixError(format!("writing incremental PDF: {error}")))?;
+        Ok(fixed)
+    }
+}
+
+fn replacements(findings: &[Finding]) -> Result<Vec<(String, String)>, FixError> {
+    findings
+        .iter()
+        .map(|finding| {
+            finding
+                .fix
+                .as_ref()
+                .map(|fix| (finding.url.clone(), fix.replacement_url.clone()))
+                .ok_or_else(|| FixError(format!("{} has no suggested fix", finding.url)))
+        })
+        .collect()
+}
+
+fn is_ooxml_link_part(name: &str) -> bool {
+    name.ends_with(".rels") || name.ends_with(".xml")
+}
+
+fn replace_urls(
+    name: &str,
+    bytes: &[u8],
+    replacements: &[(String, String)],
+    changed: &mut [bool],
+) -> Vec<u8> {
+    let mut fixed = bytes.to_vec();
+    for (index, (old, replacement)) in replacements.iter().enumerate() {
+        let mut position = 0;
+        while let Some(offset) = fixed[position..]
+            .windows(old.len())
+            .position(|window| window == old.as_bytes())
+        {
+            let start = position + offset;
+            let prefix = &fixed[start.saturating_sub(128)..start];
+            let relationship_target = name.ends_with(".rels")
+                && (prefix.ends_with(b"Target=\"") || prefix.ends_with(b"Target='"));
+            let field_code = !name.ends_with(".rels")
+                && prefix
+                    .windows(b"HYPERLINK".len())
+                    .any(|window| window == b"HYPERLINK");
+            if !relationship_target && !field_code {
+                position = start + old.len();
+                continue;
+            }
+            fixed.splice(start..start + old.len(), replacement.bytes());
+            position = start + replacement.len();
+            changed[index] = true;
+        }
+    }
+    fixed
+}
+
+fn signed_pdf(document: &lopdf::Document) -> bool {
+    if document.trailer.has(b"Perms") {
+        return true;
+    }
+    document.objects.values().any(|object| {
+        let Ok(dict) = object.as_dict() else {
+            return false;
+        };
+        dict.has(b"Perms")
+            || dict
+                .get(b"FT")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|field_type| field_type == b"Sig")
+            || dict
+                .get(b"Type")
+                .and_then(lopdf::Object::as_name)
+                .is_ok_and(|object_type| object_type == b"Sig")
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttributeSyntax {
@@ -253,10 +483,13 @@ fn encode_html_attribute(value: &str, syntax: AttributeSyntax) -> Vec<u8> {
 pub fn fixer_for(format: DocFormat) -> Option<&'static dyn Fixer> {
     static TEXT: TextFixer = TextFixer;
     static HTML: HtmlFixer = HtmlFixer;
+    static OOXML: OoxmlFixer = OoxmlFixer;
+    static PDF: PdfFixer = PdfFixer;
     match format {
         DocFormat::Markdown | DocFormat::Text => Some(&TEXT),
         DocFormat::Html => Some(&HTML),
-        DocFormat::Pdf | DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx => None,
+        DocFormat::Pdf => Some(&PDF),
+        DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx => Some(&OOXML),
     }
 }
 
@@ -328,6 +561,77 @@ mod tests {
                 fixable: Fixability::Auto,
             }),
         }
+    }
+
+    fn binary_finding(
+        format: DocFormat,
+        url: &str,
+        replacement: &str,
+        location: Location,
+    ) -> Finding {
+        Finding {
+            url: url.into(),
+            resolved_url: None,
+            source: SourceRef {
+                path: PathBuf::new(),
+                format,
+                location,
+                byte_span: None,
+            },
+            verdict: Verdict {
+                confidence: Confidence::Outdated,
+                reason: Reason::PermanentRedirect,
+                evidence: vec![],
+                checked_at: Utc::now(),
+                tier: 1,
+            },
+            fix: Some(SuggestedFix {
+                replacement_url: replacement.into(),
+                origin: FixOrigin::RedirectTarget,
+                fixable: Fixability::Auto,
+            }),
+        }
+    }
+
+    fn archive(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, contents) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(contents.as_bytes()).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn pdf() -> Vec<u8> {
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Annots [4 0 R] >>",
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /A << /S /URI /URI (https://old.test/x) >> >>",
+        ];
+        let mut output = b"%PDF-1.4\n".to_vec();
+        let mut offsets = vec![0];
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(output.len());
+            output.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = output.len();
+        output.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets.iter().skip(1) {
+            output.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        output.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        output
     }
 
     fn reference(original: &[u8], edits: &[Edit]) -> Vec<u8> {
@@ -513,6 +817,97 @@ mod tests {
         assert_eq!(
             String::from_utf8(fixed).unwrap(),
             "<a href='http://new.test/new'>x</a>"
+        );
+    }
+
+    #[test]
+    fn ooxml_splices_only_link_parts_and_raw_copies_untouched_entries() {
+        let original = archive(&[
+            (
+                "word/document.xml",
+                r#"<w:instrText> HYPERLINK \"https://old.test/x\" </w:instrText>"#,
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationship Target=\"https://old.test/x\"/>"#,
+            ),
+            ("word/media/image.bin", "unchanged"),
+        ]);
+        let finding = binary_finding(
+            DocFormat::Docx,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Docx { paragraph: 1 },
+        );
+        let fixed = OoxmlFixer.fix(&original, &[finding]).unwrap();
+        let mut before = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+        let mut after = zip::ZipArchive::new(Cursor::new(fixed)).unwrap();
+        assert_eq!(before.len(), after.len());
+        let mut old_entry = before.by_name("word/media/image.bin").unwrap();
+        let mut new_entry = after.by_name("word/media/image.bin").unwrap();
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        old_entry.read_to_end(&mut old).unwrap();
+        new_entry.read_to_end(&mut new).unwrap();
+        assert_eq!(old, new);
+    }
+
+    #[test]
+    fn pdf_fix_is_append_only_and_updates_annotation_uri() {
+        let original = pdf();
+        let finding = binary_finding(
+            DocFormat::Pdf,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Pdf {
+                page: 1,
+                annotation: Some(0),
+            },
+        );
+        let fixed = PdfFixer.fix(&original, &[finding]).unwrap();
+        assert!(fixed.starts_with(&original));
+        assert_eq!(
+            fixed
+                .windows(b"%%EOF".len())
+                .filter(|window| *window == b"%%EOF")
+                .count(),
+            2
+        );
+        let links = extract(&SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Pdf,
+            bytes: fixed,
+        })
+        .unwrap();
+        assert_eq!(links[0].url, "https://new.test/y");
+    }
+
+    #[test]
+    fn pdf_refuses_signed_marker() {
+        let mut document = lopdf::Document::load_mem(&pdf()).unwrap();
+        document
+            .get_object_mut((1, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Perms", lopdf::Dictionary::new());
+        let mut signed = Vec::new();
+        document.save_to(&mut signed).unwrap();
+        let finding = binary_finding(
+            DocFormat::Pdf,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Pdf {
+                page: 1,
+                annotation: Some(0),
+            },
+        );
+        assert!(
+            PdfFixer
+                .fix(&signed, &[finding])
+                .unwrap_err()
+                .0
+                .contains("signed PDF")
         );
     }
 }

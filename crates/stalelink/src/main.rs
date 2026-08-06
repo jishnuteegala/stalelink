@@ -529,17 +529,13 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
         }
         if !matches!(fix.fixable, Fixability::Auto) {
             eprintln!(
-                "skipped {}: fix is not automatic",
-                finding.source.path.display()
-            );
-            refused += 1;
-            continue;
-        }
-        if fixer_for(finding.source.format).is_none() {
-            eprintln!(
-                "skipped {}: {:?} fixes are not supported yet",
+                "refused {}: {}",
                 finding.source.path.display(),
-                finding.source.format
+                match &fix.fixable {
+                    Fixability::Manual => "fix requires manual editing",
+                    Fixability::Refused { reason } => reason,
+                    Fixability::Auto => unreachable!("handled above"),
+                }
             );
             refused += 1;
             continue;
@@ -571,7 +567,14 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
             }
         };
         if !args.write && !args.copy {
-            print_diff(&path, &original, &fixed);
+            if matches!(
+                format,
+                DocFormat::Pdf | DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx
+            ) {
+                print_binary_summary(&path, &findings);
+            } else {
+                print_diff(&path, &original, &fixed);
+            }
             continue;
         }
         let destination = if args.copy {
@@ -600,12 +603,23 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
 
 fn excluded(origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
     exclusions.iter().any(|exclusion| match exclusion {
-        FixExclude::Pdf => false,
+        FixExclude::Pdf => true,
         FixExclude::Redirect => origin == FixOrigin::RedirectTarget,
         FixExclude::UrlUpgrade => {
             matches!(origin, FixOrigin::HttpsUpgrade | FixOrigin::VersionUpgrade)
         }
     })
+}
+
+fn print_binary_summary(path: &Path, findings: &[Finding]) {
+    for finding in findings {
+        let replacement = &finding
+            .fix
+            .as_ref()
+            .expect("selected finding has a fix")
+            .replacement_url;
+        println!("{}: {} -> {}", path.display(), finding.url, replacement);
+    }
 }
 
 fn print_diff(path: &Path, original: &[u8], fixed: &[u8]) {
