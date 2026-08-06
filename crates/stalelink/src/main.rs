@@ -561,30 +561,39 @@ fn scan_common(
     };
     #[cfg(feature = "live-browser")]
     let tier3 = if matches!(selected_auth, Auth::Browser) {
-        if matches!(browser, auth::Browser::Firefox) {
-            eprintln!(
-                "warning: Firefox is supported for cookies but not the Chromium CDP tier; use --auth cookies or select a Chromium browser"
-            );
-            if matches!(requested_auth, Some(Auth::Browser)) {
-                return Err(USAGE);
-            }
-            None
+        let profile = auth::browser_profile(&cache_path, browser);
+        let executable = if args.auth.cdp_url.is_some() {
+            Ok(None)
         } else {
-            let profile = cache_path.join("browser-profile");
-            match runtime.block_on(auth::CdpPageDriver::launch(
+            auth::discover_executable(browser).map(Some)
+        };
+        match executable {
+            Ok(executable) => match runtime.block_on(auth::CdpPageDriver::launch(
                 &profile,
                 args.auth.cdp_url.as_deref(),
+                executable.as_deref(),
             )) {
                 Ok(drivers) => Some(auth::BrowserChecker::new(drivers)),
                 Err(error) => {
                     eprintln!(
-                        "warning: browser tier is unavailable ({error}); start Chromium with remote debugging or check its installation"
+                        "warning: {} browser tier is unavailable ({error}); start it with remote debugging or check its installation",
+                        browser.name()
                     );
                     if matches!(requested_auth, Some(Auth::Browser)) {
                         return Err(ENVIRONMENT);
                     }
                     None
                 }
+            },
+            Err(error) => {
+                eprintln!(
+                    "warning: {} browser tier is unavailable ({error}); install it or use --auth cookies",
+                    browser.name()
+                );
+                if matches!(requested_auth, Some(Auth::Browser)) {
+                    return Err(ENVIRONMENT);
+                }
+                None
             }
         }
     } else {
@@ -602,7 +611,8 @@ fn scan_common(
     #[cfg(feature = "live-browser")]
     let checker = auth::AuthChecker::new(tier1, tier2, tier3, cap);
     #[cfg(not(feature = "live-browser"))]
-    let checker = auth::AuthChecker::new(tier1, tier2, Option::<auth::CookieChecker>::None, cap);
+    let checker =
+        auth::AuthChecker::new(tier1, tier2, Option::<auth::UnavailablePageTier>::None, cap);
     let show_progress = !quiet && io::stderr().is_terminal();
     let result = if network.no_cache {
         if show_progress {

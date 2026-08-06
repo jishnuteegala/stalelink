@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "live-browser"))]
+use std::path::{Path, PathBuf};
 use std::{
     sync::{
         OnceLock,
@@ -42,11 +44,104 @@ impl Browser {
             Self::Firefox => "Firefox",
         }
     }
+
+    #[cfg(any(test, feature = "live-browser"))]
+    const fn profile_name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Chrome => "chrome",
+            Self::Edge => "edge",
+            Self::Brave => "brave",
+            Self::Chromium => "chromium",
+            Self::Firefox => "firefox",
+        }
+    }
+}
+
+#[cfg(any(test, feature = "live-browser"))]
+pub fn browser_profile(cache_dir: &Path, browser: Browser) -> PathBuf {
+    cache_dir
+        .join("browser-profiles")
+        .join(browser.profile_name())
+}
+
+#[cfg(feature = "live-browser")]
+pub fn discover_executable(browser: Browser) -> Result<PathBuf, String> {
+    discover_executable_with(browser, |path| path.is_file())
+}
+
+#[cfg(any(test, feature = "live-browser"))]
+fn discover_executable_with(
+    browser: Browser,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, String> {
+    let browsers = match browser {
+        Browser::Auto => vec![
+            Browser::Chrome,
+            Browser::Edge,
+            Browser::Brave,
+            Browser::Chromium,
+        ],
+        browser => vec![browser],
+    };
+    browsers
+        .iter()
+        .flat_map(|browser| executable_candidates(*browser))
+        .find(|path| exists(path))
+        .ok_or_else(|| format!("could not find a {} executable", browser.name()))
+}
+
+#[cfg(any(test, feature = "live-browser"))]
+fn executable_candidates(browser: Browser) -> Vec<PathBuf> {
+    let (windows, macos, unix, commands): (&[&str], &[&str], &[&str], &[&str]) = match browser {
+        Browser::Chrome => (
+            &["Google/Chrome/Application/chrome.exe"],
+            &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+            &["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"],
+            &["google-chrome", "google-chrome-stable"],
+        ),
+        Browser::Edge => (
+            &["Microsoft/Edge/Application/msedge.exe"],
+            &["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+            &["/usr/bin/microsoft-edge", "/usr/bin/microsoft-edge-stable"],
+            &["microsoft-edge", "microsoft-edge-stable"],
+        ),
+        Browser::Brave => (
+            &["BraveSoftware/Brave-Browser/Application/brave.exe"],
+            &["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"],
+            &["/usr/bin/brave-browser", "/usr/bin/brave"],
+            &["brave-browser", "brave"],
+        ),
+        Browser::Chromium => (
+            &["Chromium/Application/chrome.exe"],
+            &["/Applications/Chromium.app/Contents/MacOS/Chromium"],
+            &["/usr/bin/chromium", "/usr/bin/chromium-browser"],
+            &["chromium", "chromium-browser"],
+        ),
+        Browser::Firefox => (
+            &["Mozilla Firefox/firefox.exe"],
+            &["/Applications/Firefox.app/Contents/MacOS/firefox"],
+            &["/usr/bin/firefox"],
+            &["firefox"],
+        ),
+        Browser::Auto => unreachable!("resolved before looking up executable candidates"),
+    };
+    let mut paths = Vec::new();
+    for root in ["PROGRAMFILES", "PROGRAMFILES(X86)"] {
+        if let Some(root) = std::env::var_os(root) {
+            paths.extend(windows.iter().map(|path| PathBuf::from(&root).join(path)));
+        }
+    }
+    paths.extend(macos.iter().map(PathBuf::from));
+    paths.extend(unix.iter().map(PathBuf::from));
+    paths.extend(commands.iter().map(PathBuf::from));
+    paths
 }
 
 #[derive(Clone)]
 struct Cookie {
     domain: String,
+    host_only: bool,
     path: String,
     secure: bool,
     expires: Option<u64>,
@@ -96,6 +191,7 @@ fn cookies(snapshot: Vec<RookieCookie>) -> Vec<Cookie> {
     snapshot
         .into_iter()
         .map(|cookie| Cookie {
+            host_only: !cookie.domain.starts_with('.'),
             domain: cookie.domain,
             path: cookie.path,
             secure: cookie.secure,
@@ -113,6 +209,13 @@ pub enum Attempt {
 
 pub trait AuthTier: Send + Sync {
     fn attempt(&self, url: Url) -> CheckFuture<'_>;
+}
+
+#[allow(dead_code)]
+pub enum PageAttempt {
+    Clean,
+    Verdict(Verdict),
+    Unavailable,
 }
 
 impl<T: Checker> AuthTier for T {
@@ -275,7 +378,7 @@ fn cookie_header(cookies: &[Cookie], url: &Url) -> String {
     cookies
         .iter()
         .filter(|cookie| {
-            domain_matches(host, &cookie.domain)
+            domain_matches(host, &cookie.domain, cookie.host_only)
                 && path_matches(url.path(), &cookie.path)
                 && (!cookie.secure || url.scheme() == "https")
                 && cookie.expires.is_none_or(|expires| expires > now)
@@ -285,8 +388,11 @@ fn cookie_header(cookies: &[Cookie], url: &Url) -> String {
         .join("; ")
 }
 
-fn domain_matches(host: &str, domain: &str) -> bool {
+fn domain_matches(host: &str, domain: &str, host_only: bool) -> bool {
     let domain = domain.trim_start_matches('.');
+    if host_only {
+        return host.eq_ignore_ascii_case(domain);
+    }
     host.eq_ignore_ascii_case(domain)
         || host
             .strip_suffix(domain)
@@ -380,7 +486,7 @@ impl<T1, T2, T3> AuthChecker<T1, T2, T3> {
         }
     }
 }
-impl<T1: AuthTier, T2: CookieTier, T3: AuthTier> Checker for AuthChecker<T1, T2, T3> {
+impl<T1: AuthTier, T2: CookieTier, T3: PageTier> Checker for AuthChecker<T1, T2, T3> {
     fn check(&self, url: Url) -> CheckFuture<'_> {
         Box::pin(async move {
             let first = self.tier1.attempt(url.clone()).await;
@@ -400,7 +506,11 @@ impl<T1: AuthTier, T2: CookieTier, T3: AuthTier> Checker for AuthChecker<T1, T2,
             let Some(tier3) = &self.tier3 else {
                 return second;
             };
-            tier3.attempt(url).await.or(second)
+            match tier3.attempt_page(url).await {
+                PageAttempt::Clean => None,
+                PageAttempt::Verdict(verdict) => Some(verdict),
+                PageAttempt::Unavailable => second,
+            }
         })
     }
 }
@@ -410,6 +520,24 @@ pub trait CookieTier: Send + Sync {
         &self,
         url: Url,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Attempt> + Send + '_>>;
+}
+pub trait PageTier: Send + Sync {
+    fn attempt_page(
+        &self,
+        url: Url,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>>;
+}
+
+#[cfg(not(feature = "live-browser"))]
+pub struct UnavailablePageTier;
+#[cfg(not(feature = "live-browser"))]
+impl PageTier for UnavailablePageTier {
+    fn attempt_page(
+        &self,
+        _: Url,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
+        Box::pin(async { PageAttempt::Unavailable })
+    }
 }
 impl CookieTier for CookieChecker {
     fn attempt_cookie(
@@ -451,7 +579,7 @@ fn escalates(verdict: &Option<Verdict>, tier: u8, known_fence: bool) -> bool {
             matches!(
                 verdict.reason,
                 Reason::HttpStatus(401 | 403) | Reason::LoginWall
-            ) || (known_fence && bot_fence(verdict))
+            ) || (known_fence && matches!(verdict.reason, Reason::HttpStatus(429 | 503)))
         }
         2 => verdict.confidence == Confidence::AuthWalled || bot_fence(verdict),
         _ => false,
@@ -460,7 +588,10 @@ fn escalates(verdict: &Option<Verdict>, tier: u8, known_fence: bool) -> bool {
 
 #[cfg(any(test, feature = "live-browser"))]
 pub trait PageDriver: Send + Sync {
-    fn check_page(&self, url: Url) -> CheckFuture<'_>;
+    fn check_page(
+        &self,
+        url: Url,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>>;
 }
 #[cfg(any(test, feature = "live-browser"))]
 pub struct BrowserChecker<D> {
@@ -483,14 +614,17 @@ impl<D> BrowserChecker<D> {
     }
 }
 #[cfg(any(test, feature = "live-browser"))]
-impl<D: PageDriver> Checker for BrowserChecker<D> {
-    fn check(&self, url: Url) -> CheckFuture<'_> {
+impl<D: PageDriver> PageTier for BrowserChecker<D> {
+    fn attempt_page(
+        &self,
+        url: Url,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
         Box::pin(async move {
             if self.used.fetch_add(1, Ordering::Relaxed) >= 25 {
                 if !self.warned.swap(true, Ordering::Relaxed) {
                     eprintln!("warning: tier-3 browser budget exhausted after 25 links");
                 }
-                return Some(Verdict {
+                return PageAttempt::Verdict(Verdict {
                     confidence: Confidence::AuthWalled,
                     reason: Reason::LoginWall,
                     evidence: vec![Evidence {
@@ -503,10 +637,25 @@ impl<D: PageDriver> Checker for BrowserChecker<D> {
             }
             let slot = self.next.fetch_add(1, Ordering::Relaxed) % self.drivers.len();
             let _guard = self.slots[slot].lock().await;
-            self.drivers[slot].check_page(url).await.map(|mut verdict| {
-                verdict.tier = 3;
-                verdict
-            })
+            match self.drivers[slot].check_page(url).await {
+                PageAttempt::Verdict(mut verdict) => {
+                    verdict.tier = 3;
+                    PageAttempt::Verdict(verdict)
+                }
+                PageAttempt::Clean => PageAttempt::Clean,
+                PageAttempt::Unavailable => PageAttempt::Unavailable,
+            }
+        })
+    }
+}
+#[cfg(any(test, feature = "live-browser"))]
+impl<D: PageDriver> Checker for BrowserChecker<D> {
+    fn check(&self, url: Url) -> CheckFuture<'_> {
+        Box::pin(async move {
+            match self.attempt_page(url).await {
+                PageAttempt::Verdict(verdict) => Some(verdict),
+                PageAttempt::Clean | PageAttempt::Unavailable => None,
+            }
         })
     }
 }
@@ -521,6 +670,7 @@ impl CdpPageDriver {
     pub async fn launch(
         profile: &std::path::Path,
         debug_url: Option<&str>,
+        executable: Option<&std::path::Path>,
     ) -> Result<[Self; 4], String> {
         use chromiumoxide::browser::{Browser, BrowserConfig};
         use futures::StreamExt;
@@ -529,14 +679,13 @@ impl CdpPageDriver {
                 .await
                 .map_err(|e| e.to_string())?
         } else {
-            Browser::launch(
-                BrowserConfig::builder()
-                    .user_data_dir(profile)
-                    .build()
-                    .map_err(|e| e.to_string())?,
-            )
-            .await
-            .map_err(|e| e.to_string())?
+            let mut config = BrowserConfig::builder().user_data_dir(profile);
+            if let Some(executable) = executable {
+                config = config.chrome_executable(executable);
+            }
+            Browser::launch(config.build().map_err(|e| e.to_string())?)
+                .await
+                .map_err(|e| e.to_string())?
         };
         tokio::spawn(async move { while handler.next().await.is_some() {} });
         let mut pages = Vec::new();
@@ -555,22 +704,59 @@ impl CdpPageDriver {
 }
 #[cfg(feature = "live-browser")]
 impl PageDriver for CdpPageDriver {
-    fn check_page(&self, url: Url) -> CheckFuture<'_> {
+    fn check_page(
+        &self,
+        url: Url,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
         Box::pin(async move {
             let page = self.page.lock().await;
-            tokio::time::timeout(Duration::from_secs(30), page.goto(url.as_str()))
+            let navigation = page.wait_for_navigation_response();
+            if tokio::time::timeout(Duration::from_secs(30), page.goto(url.as_str()))
                 .await
-                .ok()?
-                .ok()?;
-            let final_url: Url = page.url().await.ok()??.parse().ok()?;
-            let content = page.content().await.ok()?.to_ascii_lowercase();
+                .ok()
+                .and_then(Result::ok)
+                .is_none()
+            {
+                return PageAttempt::Unavailable;
+            }
+            let status = tokio::time::timeout(Duration::from_secs(30), navigation)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+                .and_then(|request| {
+                    request
+                        .response
+                        .as_ref()
+                        .map(|response| response.status as u16)
+                });
+            let Some(final_url) = page
+                .url()
+                .await
+                .ok()
+                .flatten()
+                .and_then(|url| url.parse::<Url>().ok())
+            else {
+                return PageAttempt::Unavailable;
+            };
+            let Some(content) = page.content().await.ok() else {
+                return PageAttempt::Unavailable;
+            };
+            let content = content.to_ascii_lowercase();
+            if let Some(status) = status.filter(|status| !(200..300).contains(status)) {
+                return PageAttempt::Verdict(status_verdict(status));
+            }
             if login_wall(&[final_url.clone()])
                 || content.contains("captcha")
                 || content.contains("challenge")
-                || content.contains("sign in")
+                || (content.contains("sign in")
+                    && (content.contains("type=\"password\"")
+                        || content.contains("type='password'")
+                        || content.contains("name=\"password\"")
+                        || content.contains("name='password'")))
             {
                 let reason = Reason::LoginWall;
-                return Some(Verdict {
+                return PageAttempt::Verdict(Verdict {
                     confidence: reason.confidence(),
                     reason,
                     evidence: vec![Evidence {
@@ -581,7 +767,7 @@ impl PageDriver for CdpPageDriver {
                     tier: 3,
                 });
             }
-            None
+            PageAttempt::Clean
         })
     }
 }
@@ -593,6 +779,7 @@ mod tests {
     fn cookies_obey_domain_path_secure_and_expiry() {
         let base = Cookie {
             domain: "example.test".into(),
+            host_only: true,
             path: "/private".into(),
             secure: true,
             expires: None,
@@ -623,15 +810,178 @@ mod tests {
         assert!(cookie_header(&[base], &"https://example.test/public".parse().unwrap()).is_empty());
     }
 
+    #[test]
+    fn host_only_cookies_do_not_reach_subdomains() {
+        let cookie = Cookie {
+            domain: "example.test".into(),
+            host_only: true,
+            path: "/".into(),
+            secure: false,
+            expires: None,
+            name: "session".into(),
+            value: "secret".into(),
+        };
+        assert!(cookie_header(&[cookie], &"https://sub.example.test/".parse().unwrap()).is_empty());
+    }
+
     struct CleanDriver;
     impl PageDriver for CleanDriver {
-        fn check_page(&self, _: Url) -> CheckFuture<'_> {
-            Box::pin(async { None })
+        fn check_page(
+            &self,
+            _: Url,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
+            Box::pin(async { PageAttempt::Clean })
+        }
+    }
+
+    struct FakeTier(Option<Verdict>);
+    impl AuthTier for FakeTier {
+        fn attempt(&self, _: Url) -> CheckFuture<'_> {
+            let verdict = self.0.clone();
+            Box::pin(async move { verdict })
+        }
+    }
+
+    struct FakeCookie(Attempt);
+    impl CookieTier for FakeCookie {
+        fn attempt_cookie(
+            &self,
+            _: Url,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Attempt> + Send + '_>> {
+            let attempt = match &self.0 {
+                Attempt::Verdict(verdict) => Attempt::Verdict(verdict.clone()),
+                Attempt::Unavailable => Attempt::Unavailable,
+            };
+            Box::pin(async move { attempt })
+        }
+    }
+
+    struct FakePage(PageAttempt);
+    impl PageTier for FakePage {
+        fn attempt_page(
+            &self,
+            _: Url,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
+            let attempt = match &self.0 {
+                PageAttempt::Clean => PageAttempt::Clean,
+                PageAttempt::Verdict(verdict) => PageAttempt::Verdict(verdict.clone()),
+                PageAttempt::Unavailable => PageAttempt::Unavailable,
+            };
+            Box::pin(async move { attempt })
+        }
+    }
+
+    fn fake_verdict(reason: Reason) -> Verdict {
+        Verdict {
+            confidence: reason.confidence(),
+            reason,
+            evidence: vec![],
+            checked_at: Utc::now(),
+            tier: 1,
         }
     }
 
     #[tokio::test]
+    async fn auth_decision_table_covers_every_trigger_and_no_trigger() {
+        let url: Url = "https://github.com/private".parse().unwrap();
+        for reason in [
+            Reason::HttpStatus(401),
+            Reason::HttpStatus(403),
+            Reason::LoginWall,
+        ] {
+            let checker = AuthChecker::new(
+                FakeTier(Some(fake_verdict(reason.clone()))),
+                Some(FakeCookie(Attempt::Verdict(None))),
+                Some(FakePage(PageAttempt::Clean)),
+                AuthCap::Browser,
+            );
+            assert!(checker.check(url.clone()).await.is_none());
+        }
+        for status in [429, 503] {
+            let checker = AuthChecker::new(
+                FakeTier(Some(fake_verdict(Reason::HttpStatus(status)))),
+                Some(FakeCookie(Attempt::Verdict(None))),
+                Some(FakePage(PageAttempt::Clean)),
+                AuthCap::Browser,
+            );
+            assert!(checker.check(url.clone()).await.is_none());
+        }
+        for reason in [
+            Reason::Soft404,
+            Reason::NetworkError(stalelink_core::model::NetKind::Dns),
+        ] {
+            let checker = AuthChecker::new(
+                FakeTier(Some(fake_verdict(reason.clone()))),
+                Some(FakeCookie(Attempt::Verdict(None))),
+                Some(FakePage(PageAttempt::Clean)),
+                AuthCap::Browser,
+            );
+            assert_eq!(checker.check(url.clone()).await.unwrap().reason, reason);
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_browser_page_clears_cookie_auth_wall_but_unavailable_preserves_it() {
+        let wall = fake_verdict(Reason::LoginWall);
+        let clean = AuthChecker::new(
+            FakeTier(Some(wall.clone())),
+            Some(FakeCookie(Attempt::Verdict(Some(wall.clone())))),
+            Some(FakePage(PageAttempt::Clean)),
+            AuthCap::Browser,
+        );
+        assert!(
+            clean
+                .check("https://example.test/private".parse().unwrap())
+                .await
+                .is_none()
+        );
+        let unavailable = AuthChecker::new(
+            FakeTier(Some(wall.clone())),
+            Some(FakeCookie(Attempt::Verdict(Some(wall.clone())))),
+            Some(FakePage(PageAttempt::Unavailable)),
+            AuthCap::Browser,
+        );
+        assert_eq!(
+            unavailable
+                .check("https://example.test/private".parse().unwrap())
+                .await
+                .unwrap()
+                .reason,
+            Reason::LoginWall
+        );
+    }
+
+    #[test]
+    fn browser_discovery_and_profiles_are_browser_specific() {
+        let found = discover_executable_with(Browser::Edge, |path| {
+            path.ends_with("Microsoft/Edge/Application/msedge.exe")
+        })
+        .unwrap();
+        assert!(found.ends_with("Microsoft/Edge/Application/msedge.exe"));
+        let cache = Path::new("cache");
+        assert_ne!(
+            browser_profile(cache, Browser::Chrome),
+            browser_profile(cache, Browser::Brave)
+        );
+    }
+
+    #[tokio::test]
     async fn browser_budget_reports_every_overflow() {
+        if std::env::var_os("STALELINK_CAPTURE_BUDGET_WARNING").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "auth::tests::browser_budget_reports_every_overflow",
+                    "--nocapture",
+                ])
+                .env("STALELINK_CAPTURE_BUDGET_WARNING", "1")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert_eq!(stderr.matches("tier-3 browser budget exhausted").count(), 1);
+            return;
+        }
         let checker = BrowserChecker::new([CleanDriver, CleanDriver, CleanDriver, CleanDriver]);
         for index in 0..25 {
             assert!(
