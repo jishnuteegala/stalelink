@@ -24,8 +24,10 @@ httpdate.workspace = true
 lopdf.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
+lol_html.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
 wiremock = "0.6"
+proptest.workspace = true

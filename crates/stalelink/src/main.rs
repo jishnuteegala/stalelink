@@ -3,9 +3,11 @@ mod config;
 mod output;
 
 use std::{
+    collections::BTreeMap,
+    fs,
     fs::File,
     io::{self, IsTerminal, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -14,7 +16,9 @@ use clap_complete::{Shell, generate};
 use regex::Regex;
 use stalelink_core::{
     check::HttpChecker,
-    model::Confidence,
+    extract::{SourceDocument, extract},
+    fix::fixer_for,
+    model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
     report::{ReportSink, TableSink},
     scan::{NoProgress, Progress, ScanInput, scan},
     walk::WalkOptions,
@@ -60,13 +64,13 @@ enum Command {
     Completions { shell: Shell },
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct ScanArgs {
     #[command(flatten)]
     common: CommonArgs,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct FixArgs {
     #[command(flatten)]
     common: CommonArgs,
@@ -87,7 +91,7 @@ struct FixArgs {
     min_fix_confidence: ConfidenceLevel,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct CommonArgs {
     #[command(flatten)]
     output: OutputArgs,
@@ -118,7 +122,7 @@ struct CommonArgs {
     auth: AuthArgs,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct OutputArgs {
     /// Findings format on stdout
     #[arg(long, value_enum, default_value_t = OutputFormat::Table)]
@@ -137,7 +141,7 @@ struct OutputArgs {
     fail_on: Option<ConfidenceLevel>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct NetworkArgs {
     /// Global request concurrency
     #[arg(long)]
@@ -165,7 +169,7 @@ struct NetworkArgs {
     refresh: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct AuthArgs {
     /// Maximum auth tier: off = plain HTTP, cookies = browser cookies, browser = real browser
     #[arg(long, value_enum, default_value_t = Auth::Cookies)]
@@ -294,20 +298,51 @@ fn run(cli: Cli) -> ExitCode {
         }
         Command::Scan(args) => run_scan(args, cli.quiet),
         Command::Cache { command } => run_cache(command),
-        Command::Fix(_) => {
-            eprintln!("error: not implemented yet");
-            ExitCode::from(ENVIRONMENT)
-        }
+        Command::Fix(args) => run_fix(args, cli.quiet),
     }
 }
 
 fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
-    let mut paths = args.common.paths;
-    if args.common.stdin {
+    let (mut report, fail_on) = match scan_common(&args.common, quiet) {
+        Ok(report) => report,
+        Err(exit_code) => return ExitCode::from(exit_code),
+    };
+    let failed = report
+        .findings
+        .iter()
+        .any(|finding| finding.verdict.confidence >= fail_on);
+    let minimum = Confidence::from(args.common.output.min_confidence);
+    report
+        .findings
+        .retain(|finding| finding.verdict.confidence >= minimum);
+    let format = if args.common.output.json {
+        OutputFormat::Json
+    } else {
+        args.common.output.format
+    };
+    let exit_code = if failed { 1 } else { CLEAN };
+    let result = if let Some(path) = args.common.output.output {
+        File::create(path).and_then(|file| write_report(file, format, &report, exit_code))
+    } else {
+        write_report(io::stdout(), format, &report, exit_code)
+    };
+    if let Err(error) = result {
+        eprintln!("error: writing report: {error}");
+        return ExitCode::from(ENVIRONMENT);
+    }
+    ExitCode::from(exit_code)
+}
+
+fn scan_common(
+    args: &CommonArgs,
+    quiet: bool,
+) -> Result<(stalelink_core::scan::ScanReport, Confidence), u8> {
+    let mut paths = args.paths.clone();
+    if args.stdin {
         let mut input = String::new();
         if let Err(error) = io::stdin().read_to_string(&mut input) {
             eprintln!("error: reading stdin: {error}");
-            return ExitCode::from(ENVIRONMENT);
+            return Err(ENVIRONMENT);
         }
         paths.extend(
             input
@@ -319,12 +354,12 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     // A scan uses the nearest config above its first input path; stdin paths are
     // appended after positional paths, so stdin-only scans use their first line.
     let first_path = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-    let network = &args.common.network;
+    let network = &args.network;
     let mut settings = match config::resolve(&first_path) {
         Ok(settings) => settings,
         Err(error) => {
             eprintln!("error: {error}");
-            return ExitCode::from(USAGE);
+            return Err(USAGE);
         }
     };
     if let Some(value) = network.max_concurrency {
@@ -347,14 +382,14 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             Ok(ttl) => ttl,
             Err(error) => {
                 eprintln!("error: invalid --cache-ttl: {error}");
-                return ExitCode::from(USAGE);
+                return Err(USAGE);
             }
         };
     }
-    if args.common.no_local {
+    if args.no_local {
         settings.ignore.local_links = true;
     }
-    let fail_on = match args.common.output.fail_on {
+    let fail_on = match args.output.fail_on {
         Some(value) => value,
         None => match settings.output.fail_on.parse::<ConfidenceLevel>() {
             Ok(value) => value,
@@ -363,18 +398,17 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
                     "error: invalid output.fail-on value: {}",
                     settings.output.fail_on
                 );
-                return ExitCode::from(USAGE);
+                return Err(USAGE);
             }
         },
     };
     if settings.network.max_concurrency == 0 || settings.network.per_host == 0 {
         eprintln!("error: --max-concurrency and --per-host must be at least 1");
-        return ExitCode::from(USAGE);
+        return Err(USAGE);
     }
     // Validate argument values (usage errors) before any path or environment
     // check, so a bad regex reports exit 2 regardless of whether a path exists.
     let exclude_urls = match args
-        .common
         .exclude_url
         .iter()
         .chain(settings.ignore.exclude_url.iter())
@@ -384,13 +418,13 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         Ok(regexes) => regexes,
         Err(error) => {
             eprintln!("error: invalid --exclude-url regex: {error}");
-            return ExitCode::from(USAGE);
+            return Err(USAGE);
         }
     };
     for path in &paths {
         if !path.exists() {
             eprintln!("error: path does not exist: {}", path.display());
-            return ExitCode::from(ENVIRONMENT);
+            return Err(ENVIRONMENT);
         }
     }
     let checker = match HttpChecker::new(
@@ -405,17 +439,17 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         Ok(checker) => checker,
         Err(error) => {
             eprintln!("error: creating HTTP client: {error}");
-            return ExitCode::from(ENVIRONMENT);
+            return Err(ENVIRONMENT);
         }
     };
     let cache_path = cache_path(settings.cache.dir.as_deref());
     let input = ScanInput {
         paths,
         walk: WalkOptions {
-            include: args.common.include,
+            include: args.include.clone(),
             exclude: args
-                .common
                 .exclude
+                .clone()
                 .into_iter()
                 .chain(settings.ignore.exclude)
                 .collect(),
@@ -423,8 +457,8 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         max_concurrency: settings.network.max_concurrency as usize,
         exclude_urls,
         exclude_domains: args
-            .common
             .exclude_domain
+            .clone()
             .into_iter()
             .chain(settings.ignore.exclude_domain)
             .map(|domain| domain.to_ascii_lowercase())
@@ -435,7 +469,7 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("error: creating runtime: {error}");
-            return ExitCode::from(ENVIRONMENT);
+            return Err(ENVIRONMENT);
         }
     };
     let show_progress = !quiet && io::stderr().is_terminal();
@@ -450,7 +484,7 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             Ok(cache) => cache,
             Err(error) => {
                 eprintln!("error: {error}");
-                return ExitCode::from(ENVIRONMENT);
+                return Err(ENVIRONMENT);
             }
         };
         let checker =
@@ -462,44 +496,217 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         };
         if let Some(error) = checker.error() {
             eprintln!("error: {error}");
-            return ExitCode::from(ENVIRONMENT);
+            return Err(ENVIRONMENT);
         }
         result
     };
     if show_progress {
         eprintln!();
     }
-    let mut report = match result {
-        Ok(report) => report,
+    match result {
+        Ok(report) => Ok((report, Confidence::from(fail_on))),
         Err(error) => {
             eprintln!("error: {error}");
-            return ExitCode::from(ENVIRONMENT);
+            Err(ENVIRONMENT)
         }
-    };
-    let failed = report
-        .findings
-        .iter()
-        .any(|finding| finding.verdict.confidence >= Confidence::from(fail_on));
-    let minimum = Confidence::from(args.common.output.min_confidence);
-    report
-        .findings
-        .retain(|finding| finding.verdict.confidence >= minimum);
-    let format = if args.common.output.json {
-        OutputFormat::Json
-    } else {
-        args.common.output.format
-    };
-    let exit_code = if failed { 1 } else { CLEAN };
-    let result = if let Some(path) = args.common.output.output {
-        File::create(path).and_then(|file| write_report(file, format, &report, exit_code))
-    } else {
-        write_report(io::stdout(), format, &report, exit_code)
-    };
-    if let Err(error) = result {
-        eprintln!("error: writing report: {error}");
-        return ExitCode::from(ENVIRONMENT);
     }
-    ExitCode::from(exit_code)
+}
+
+fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
+    let report = match scan_common(&args.common, quiet) {
+        Ok((report, _)) => report,
+        Err(exit_code) => return ExitCode::from(exit_code),
+    };
+    let minimum = Confidence::from(args.min_fix_confidence);
+    let mut by_path: BTreeMap<PathBuf, Vec<Finding>> = BTreeMap::new();
+    let mut refused = 0usize;
+    for finding in report.findings {
+        let Some(fix) = &finding.fix else { continue };
+        if finding.verdict.confidence < minimum || excluded(fix.origin, &args.fix_exclude) {
+            continue;
+        }
+        if !matches!(fix.fixable, Fixability::Auto) {
+            eprintln!(
+                "skipped {}: fix is not automatic",
+                finding.source.path.display()
+            );
+            refused += 1;
+            continue;
+        }
+        if fixer_for(finding.source.format).is_none() {
+            eprintln!(
+                "skipped {}: {:?} fixes are not supported yet",
+                finding.source.path.display(),
+                finding.source.format
+            );
+            refused += 1;
+            continue;
+        }
+        by_path
+            .entry(finding.source.path.clone())
+            .or_default()
+            .push(finding);
+    }
+    for (path, findings) in by_path {
+        let original = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("failed {}: reading: {error}", path.display());
+                refused += 1;
+                continue;
+            }
+        };
+        let format = findings[0].source.format;
+        let fixed = match fixer_for(format)
+            .expect("text format has a fixer")
+            .fix(&original, &findings)
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("refused {}: {}", path.display(), error.0);
+                refused += 1;
+                continue;
+            }
+        };
+        if !args.write && !args.copy {
+            print_diff(&path, &original, &fixed);
+            continue;
+        }
+        let destination = if args.copy {
+            fixed_copy_path(&path)
+        } else {
+            path.clone()
+        };
+        let result = if args.copy {
+            write_new_file(&destination, &fixed).and_then(|()| {
+                fs::read(&destination)
+                    .map_err(|error| format!("reading written copy: {error}"))
+                    .and_then(|written| verify_fixed(&destination, format, &written, &findings))
+            })
+        } else {
+            write_in_place(&path, &original, &fixed, args.backup, |bytes| {
+                verify_fixed(&path, format, bytes, &findings)
+            })
+        };
+        if let Err(error) = result {
+            eprintln!("failed {}: {error}", destination.display());
+            refused += 1;
+        }
+    }
+    ExitCode::from(if refused == 0 { CLEAN } else { 1 })
+}
+
+fn excluded(origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
+    exclusions.iter().any(|exclusion| match exclusion {
+        FixExclude::Pdf => false,
+        FixExclude::Redirect => origin == FixOrigin::RedirectTarget,
+        FixExclude::UrlUpgrade => {
+            matches!(origin, FixOrigin::HttpsUpgrade | FixOrigin::VersionUpgrade)
+        }
+    })
+}
+
+fn print_diff(path: &Path, original: &[u8], fixed: &[u8]) {
+    let original = String::from_utf8_lossy(original);
+    let fixed = String::from_utf8_lossy(fixed);
+    let diff = similar::TextDiff::from_lines(&original, &fixed)
+        .unified_diff()
+        .header(
+            &format!("a/{}", path.display()),
+            &format!("b/{}", path.display()),
+        )
+        .to_string();
+    print!("{diff}");
+}
+
+fn fixed_copy_path(path: &Path) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    match path.extension() {
+        Some(extension) => {
+            path.with_file_name(format!("{stem}.fixed.{}", extension.to_string_lossy()))
+        }
+        None => path.with_file_name(format!("{stem}.fixed")),
+    }
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if path.exists() {
+        return Err("refusing to overwrite existing fixed copy".into());
+    }
+    fs::write(path, bytes).map_err(|error| format!("writing copy: {error}"))
+}
+
+fn write_in_place(
+    path: &Path,
+    original: &[u8],
+    fixed: &[u8],
+    backup: bool,
+    verify: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    if backup {
+        fs::write(
+            path.with_extension(format!(
+                "{}bak",
+                path.extension()
+                    .map_or_else(String::new, |ext| format!("{}.", ext.to_string_lossy()))
+            )),
+            original,
+        )
+        .map_err(|error| format!("writing backup: {error}"))?;
+    }
+    let temporary = path.with_file_name(format!(
+        ".{}.stalelink.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    fs::write(&temporary, fixed).map_err(|error| format!("writing temporary file: {error}"))?;
+    // Windows rename cannot replace an existing destination. Removing first is a
+    // short non-atomic gap, but the original bytes remain in memory for restore.
+    #[cfg(windows)]
+    fs::remove_file(path).map_err(|error| format!("replacing original: {error}"))?;
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::write(path, original);
+        return Err(format!("replacing original: {error}"));
+    }
+    let result = fs::read(path)
+        .map_err(|error| format!("reading written file: {error}"))
+        .and_then(|written| verify(&written));
+    if let Err(error) = result {
+        fs::write(path, original)
+            .map_err(|restore| format!("{error}; restoring original: {restore}"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn verify_fixed(
+    path: &Path,
+    format: DocFormat,
+    bytes: &[u8],
+    findings: &[Finding],
+) -> Result<(), String> {
+    let links = extract(&SourceDocument {
+        path: path.to_path_buf(),
+        format,
+        bytes: bytes.to_vec(),
+    })
+    .map_err(|error| format!("re-parsing fixed file: {}", error.0))?;
+    for finding in findings {
+        let replacement = &finding
+            .fix
+            .as_ref()
+            .expect("selected finding has a fix")
+            .replacement_url;
+        if !links.iter().any(|link| link.url == *replacement) {
+            return Err(format!(
+                "replacement URL was not extractable: {replacement}"
+            ));
+        }
+        if links.iter().any(|link| link.url == finding.url) {
+            return Err(format!("old URL is still extractable: {}", finding.url));
+        }
+    }
+    Ok(())
 }
 
 fn write_report(
@@ -579,5 +786,20 @@ mod tests {
         for (level, expected) in cases {
             assert_eq!(Confidence::from(level), expected);
         }
+    }
+
+    #[test]
+    fn failed_verification_restores_original_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("note.txt");
+        let original = b"original\0bytes";
+        fs::write(&path, original).unwrap();
+
+        let result = write_in_place(&path, original, b"fixed", false, |_| {
+            Err("failed verification".into())
+        });
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 }

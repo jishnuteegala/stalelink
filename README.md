@@ -59,6 +59,16 @@ The JSON report has a top-level `schema_version` (currently `1`), `run`, and `fi
 
 SARIF rule IDs are stable: `SL0001` HTTP status, `SL0002` network error, `SL0003` soft-404, `SL0101` login wall, `SL0201` permanent redirect, `SL0202` staleness banner, `SL0203` version drift, `SL0204` far-past last-modified, `SL0301` anomalous response, `SL0401` missing local target, and `SL0402` invalid syntax. Dead-certain findings are SARIF errors, likely-dead and outdated findings warnings, and auth-walled and suspect findings notes. Text findings include line/column regions; binary-document location data remains in result properties. Completed runs include `invocations[0]` with `executionSuccessful` and the process exit code, without recording the command line or working directory.
 
+## Fixing text links
+
+`stalelink fix <paths>` runs the same scan as `scan` and considers automatic suggested fixes for Markdown, plain text, and HTML. It prints unified diffs to stdout by default and never modifies a file in this mode. A dry run that has pending diffs exits 0 so it is safe for review scripts.
+
+Use `--write` to replace links in place. The replacement is written to a temporary file in the document's directory and renamed into place, then stalelink extracts the resulting document again to confirm every replacement URL is present and every old URL is absent. Failed verification restores the original bytes and exits 1. On Windows, replacing an existing destination requires a remove-then-rename step; the original bytes remain in memory until verification completes so they can be restored if replacement or verification fails.
+
+`--backup` requires `--write` and retains the original at `<file>.bak` (for example, `note.txt.bak`). `--copy` instead creates `<stem>.fixed.<ext>` without modifying the original and conflicts with `--write`; it refuses to overwrite an existing copy. `--min-fix-confidence` defaults to `dead-certain`; redirects are normally `outdated`, so use `--min-fix-confidence outdated` to apply redirect suggestions. Repeat `--fix-exclude redirect` to omit redirect targets or `--fix-exclude url-upgrade` to omit HTTPS and version upgrades.
+
+Binary formats are currently reported as skipped by `fix` and are never modified. Exit code 0 means a dry run completed or all requested text fixes completed, 1 means a fix was refused or verification failed, 2 means invalid arguments/configuration, and 3 means an environment or IO setup failure.
+
 ## License
 
 MIT - see [LICENSE](LICENSE)
