@@ -33,6 +33,114 @@ pub trait Checker: Send + Sync {
     fn check(&self, url: Url) -> CheckFuture<'_>;
 }
 
+/// The maximum authentication tier permitted for an escalating checker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthCap {
+    Off,
+    Cookies,
+    Browser,
+}
+
+impl AuthCap {
+    pub const fn tier(self) -> u8 {
+        match self {
+            Self::Off => 1,
+            Self::Cookies => 2,
+            Self::Browser => 3,
+        }
+    }
+}
+
+/// A tier-specific checker used internally by the escalation wrapper.
+pub trait AuthTier: Send + Sync {
+    fn attempt(&self, url: Url) -> CheckFuture<'_>;
+}
+
+impl<T: Checker> AuthTier for T {
+    fn attempt(&self, url: Url) -> CheckFuture<'_> {
+        Checker::check(self, url)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escalation {
+    None,
+    Cookies,
+    Browser,
+}
+
+/// Pure trigger table. Callers must not escalate soft-404s or network failures.
+pub fn escalation(
+    verdict: Option<&Verdict>,
+    current_tier: u8,
+    known_auth_fenced_host: bool,
+) -> Escalation {
+    let Some(verdict) = verdict else {
+        return Escalation::None;
+    };
+    match current_tier {
+        1 if matches!(
+            verdict.reason,
+            Reason::HttpStatus(401 | 403) | Reason::LoginWall
+        ) || (known_auth_fenced_host && bot_fence(verdict)) =>
+        {
+            Escalation::Cookies
+        }
+        2 if verdict.confidence == crate::model::Confidence::AuthWalled || bot_fence(verdict) => {
+            Escalation::Browser
+        }
+        _ => Escalation::None,
+    }
+}
+
+fn bot_fence(verdict: &Verdict) -> bool {
+    matches!(verdict.reason, Reason::HttpStatus(403 | 429 | 503))
+        && verdict.evidence.iter().any(|evidence| {
+            let value = format!("{} {}", evidence.kind, evidence.detail).to_ascii_lowercase();
+            value.contains("captcha") || value.contains("challenge") || value.contains("bot")
+        })
+}
+
+pub struct EscalatingChecker<T1, T2, T3> {
+    tier1: T1,
+    tier2: Option<T2>,
+    tier3: Option<T3>,
+    cap: AuthCap,
+}
+
+impl<T1, T2, T3> EscalatingChecker<T1, T2, T3> {
+    pub fn new(tier1: T1, tier2: Option<T2>, tier3: Option<T3>, cap: AuthCap) -> Self {
+        Self {
+            tier1,
+            tier2,
+            tier3,
+            cap,
+        }
+    }
+}
+
+impl<T1: AuthTier, T2: AuthTier, T3: AuthTier> Checker for EscalatingChecker<T1, T2, T3> {
+    fn check(&self, url: Url) -> CheckFuture<'_> {
+        Box::pin(async move {
+            let first = self.tier1.attempt(url.clone()).await;
+            if self.cap.tier() < 2 || escalation(first.as_ref(), 1, false) != Escalation::Cookies {
+                return first;
+            }
+            let Some(tier2) = &self.tier2 else {
+                return first;
+            };
+            let second = tier2.attempt(url.clone()).await;
+            if self.cap.tier() < 3 || escalation(second.as_ref(), 2, false) != Escalation::Browser {
+                return second;
+            }
+            let Some(tier3) = &self.tier3 else {
+                return second;
+            };
+            tier3.attempt(url).await
+        })
+    }
+}
+
 pub struct HttpChecker {
     raw: reqwest::Client,
     retries: u8,
@@ -635,6 +743,54 @@ mod tests {
 
     use super::*;
     use crate::model::Confidence;
+
+    fn auth_verdict(reason: Reason) -> Verdict {
+        Verdict {
+            confidence: reason.confidence(),
+            reason,
+            evidence: vec![],
+            checked_at: Utc::now(),
+            tier: 1,
+        }
+    }
+
+    #[test]
+    fn escalation_trigger_table_is_closed_over_auth_cases() {
+        for reason in [
+            Reason::HttpStatus(401),
+            Reason::HttpStatus(403),
+            Reason::LoginWall,
+        ] {
+            assert_eq!(
+                escalation(Some(&auth_verdict(reason)), 1, false),
+                Escalation::Cookies
+            );
+        }
+        let fence = Verdict {
+            evidence: vec![Evidence {
+                kind: "challenge".into(),
+                detail: "captcha".into(),
+            }],
+            ..auth_verdict(Reason::HttpStatus(403))
+        };
+        assert_eq!(escalation(Some(&fence), 1, true), Escalation::Cookies);
+        assert_eq!(
+            escalation(Some(&auth_verdict(Reason::LoginWall)), 2, false),
+            Escalation::Browser
+        );
+        for reason in [
+            Reason::HttpStatus(404),
+            Reason::Soft404,
+            Reason::NetworkError(NetKind::Timeout),
+            Reason::HttpStatus(500),
+        ] {
+            assert_eq!(
+                escalation(Some(&auth_verdict(reason)), 1, false),
+                Escalation::None
+            );
+        }
+        assert_eq!(escalation(None, 1, false), Escalation::None);
+    }
 
     async fn checker() -> HttpChecker {
         HttpChecker::new(Duration::from_secs(2), 0, 2, "stalelink-test".into()).unwrap()

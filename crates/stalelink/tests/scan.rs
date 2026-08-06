@@ -95,6 +95,75 @@ async fn clean_corpus_exits_zero_with_empty_stdout() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cookies_turn_a_login_wall_into_a_clean_link() {
+    let server = MockServer::start().await;
+    Mock::given(path("/private"))
+        .and(wiremock::matchers::header("cookie", "session=granted"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(path("/private"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("sign in to continue"))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.md"),
+        format!("{}/private", server.uri()),
+    )
+    .unwrap();
+
+    scan(directory.path(), &["--auth", "off"])
+        .code(1)
+        .stdout(predicate::str::contains("AUTH-WALLED"));
+
+    let cookies = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cookies.path().join("cookies.json"),
+        r#"[["127.0.0.1", "session", "granted"]]"#,
+    )
+    .unwrap();
+    let mut command = util::command();
+    command
+        .env("STALELINK_COOKIE_STORE_DIR", cookies.path())
+        .args([
+            "scan",
+            "--no-cache",
+            "--retries",
+            "0",
+            directory.path().to_str().unwrap(),
+        ]);
+    tokio::task::block_in_place(|| command.assert())
+        .code(0)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "notice: reading auto browser-profile cookies",
+        ));
+}
+
+#[test]
+fn unreadable_cookie_store_warns_once_and_explicit_cookies_exit_three() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.md"),
+        "https://example.test/private",
+    )
+    .unwrap();
+    let missing = directory.path().join("missing-store");
+    let mut command = util::command();
+    command.env("STALELINK_COOKIE_STORE_DIR", &missing).args([
+        "scan",
+        "--no-cache",
+        "--auth",
+        "cookies",
+        directory.path().to_str().unwrap(),
+    ]);
+    let output = command.assert().code(3).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("cookie store is unavailable").count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fail_on_dead_certain_ignores_suspect_findings() {
     let server = serve(&[("/flaky", 500)]).await;
     let dir = tempfile::tempdir().unwrap();
