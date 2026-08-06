@@ -348,7 +348,9 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
     }
 
     let mut position = 0;
-    let mut fields = Vec::new();
+    // Keep this single slot aligned with extract_docx: a nested begin replaces
+    // the active field and the first end consumes it.
+    let mut field = None;
     while let Some(tag_offset) = text[position..].find('<') {
         let tag_start = position + tag_offset;
         let Some(tag_end) = text[tag_start..].find('>') else {
@@ -368,9 +370,9 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
                 .as_ref()
                 .map(|(_, value)| value.as_str())
             {
-                Some("begin") => fields.push(Vec::new()),
+                Some("begin") => field = Some(Vec::new()),
                 Some("end") => {
-                    if let Some(field) = fields.pop() {
+                    if let Some(field) = field.take() {
                         groups.push(field);
                     }
                 }
@@ -388,7 +390,7 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
                     content_start..content_end,
                     xml_unescape(&text[content_start..content_end]),
                 );
-                if let Some(field) = fields.last_mut() {
+                if let Some(field) = &mut field {
                     field.push(instruction);
                 } else {
                     groups.push(vec![instruction]);
@@ -1339,6 +1341,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["https://old.", replacement]
         );
+    }
+
+    #[test]
+    fn ooxml_does_not_splice_across_nested_complex_fields() {
+        let replacement = "https://new.test/y";
+        let document_xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK &quot;https://old.</w:instrText><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="end"/><w:instrText>test/x&quot;</w:instrText></w:p><w:p><w:hyperlink r:id="r"/></w:p></w:body></w:document>"#;
+        let original = archive(&[
+            ("word/document.xml", document_xml),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r" Type="hyperlink" TargetMode="External" Target="https://old.test/x"/></Relationships>"#,
+            ),
+        ]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Docx,
+            bytes: original.clone(),
+        };
+        let findings = extract(&document)
+            .unwrap()
+            .into_iter()
+            .filter(|link| link.url == "https://old.test/x")
+            .map(|link| {
+                binary_finding(
+                    DocFormat::Docx,
+                    &link.url,
+                    replacement,
+                    link.source.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 1);
+
+        let fixed = OoxmlFixer.fix(&original, &findings).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(fixed)).unwrap();
+        let mut fixed_document = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut fixed_document)
+            .unwrap();
+        assert_eq!(fixed_document, document_xml);
+        let mut relationships = String::new();
+        archive
+            .by_name("word/_rels/document.xml.rels")
+            .unwrap()
+            .read_to_string(&mut relationships)
+            .unwrap();
+        assert!(relationships.contains(replacement));
     }
 
     #[test]
