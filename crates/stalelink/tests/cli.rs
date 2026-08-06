@@ -177,6 +177,18 @@ async fn verbosity_levels_add_url_and_response_details() {
     assert!(output.status.success());
     let triple = String::from_utf8(output.stderr).unwrap();
     assert!(triple.contains("response url="));
+
+    util::command()
+        .args([
+            "--quiet",
+            "-vvv",
+            "scan",
+            "--no-cache",
+            file.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr("");
 }
 
 #[test]

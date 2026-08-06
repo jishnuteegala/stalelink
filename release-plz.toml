@@ -1,6 +1,8 @@
 [workspace]
 changelog_config = "cliff.toml"
 publish = false
+# Only the merge commit of a release-plz PR may run the release command.
+release_always = false
 
 [[package]]
 name = "stalelink-core"
@@ -13,5 +15,6 @@ publish = true
 name = "stalelink"
 changelog_update = true
 git_tag_enable = true
-git_release_enable = true
+# cargo-dist owns the draft GitHub Release and its artifacts.
+git_release_enable = false
 publish = true

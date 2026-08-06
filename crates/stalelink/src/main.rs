@@ -282,6 +282,7 @@ impl Progress for StderrProgress {
 
 struct VerboseProgress {
     verbose: u8,
+    quiet: bool,
     cache_enabled: bool,
     refresh: bool,
     auth_cap: Auth,
@@ -292,7 +293,7 @@ impl Progress for VerboseProgress {
         trace_at(
             self.verbose,
             2,
-            false,
+            self.quiet,
             format_args!(
                 "check url={url} tier-cap={:?} cache={} refresh={}",
                 self.auth_cap, self.cache_enabled, self.refresh
@@ -305,7 +306,7 @@ impl Progress for VerboseProgress {
             Some(verdict) => trace_at(
                 self.verbose,
                 3,
-                false,
+                self.quiet,
                 format_args!(
                     "response url={url} tier={} confidence={:?} reason={:?} evidence={:?}",
                     verdict.tier, verdict.confidence, verdict.reason, verdict.evidence
@@ -314,7 +315,7 @@ impl Progress for VerboseProgress {
             None => trace_at(
                 self.verbose,
                 3,
-                false,
+                self.quiet,
                 format_args!("response url={url} clean"),
             ),
         }
@@ -705,6 +706,7 @@ fn scan_common(
     let show_progress = !quiet && io::stderr().is_terminal();
     let verbose_progress = VerboseProgress {
         verbose,
+        quiet,
         cache_enabled: !network.no_cache,
         refresh: network.refresh,
         auth_cap: selected_auth,
