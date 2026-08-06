@@ -248,14 +248,23 @@ fn replace_urls(
     changed: &mut [bool],
 ) -> Vec<u8> {
     let mut edits = Vec::new();
+    let mut replacements_changed = vec![false; replacements.len()];
     for values in xml_value_groups(name, bytes) {
         for (index, (old, replacement)) in replacements.iter().enumerate() {
             if add_url_edits(bytes, &values, old, replacement, &mut edits) {
-                changed[index] = true;
+                replacements_changed[index] = true;
             }
         }
     }
-    apply_edits(bytes, &edits).unwrap_or_else(|_| bytes.to_vec())
+    match apply_edits(bytes, &edits) {
+        Ok(fixed) => {
+            for (changed, replacement_changed) in changed.iter_mut().zip(replacements_changed) {
+                *changed |= replacement_changed;
+            }
+            fixed
+        }
+        Err(_) => bytes.to_vec(),
+    }
 }
 
 fn xml_escape(value: &str) -> String {
@@ -278,33 +287,39 @@ fn add_url_edits(
         .iter()
         .map(|(_, value)| value.as_str())
         .collect::<String>();
-    let Some(start) = combined.find(old) else {
-        return false;
-    };
-    let mut offset = 0;
-    let mut wrote_replacement = false;
-    for (range, value) in values {
-        let value_end = offset + value.len();
-        let overlap_start = start.max(offset);
-        let overlap_end = (start + old.len()).min(value_end);
-        if overlap_start < overlap_end {
-            let portion = &value[overlap_start - offset..overlap_end - offset];
-            let Some(span) = xml_subrange(bytes, range, value, portion) else {
-                return false;
-            };
-            edits.push(Edit {
-                span,
-                replacement: if wrote_replacement {
-                    Vec::new()
-                } else {
-                    wrote_replacement = true;
-                    xml_escape(replacement).into_bytes()
-                },
-            });
+    let mut found = false;
+    let mut search_start = 0;
+    while let Some(start) = combined[search_start..].find(old) {
+        let start = search_start + start;
+        let end = start + old.len();
+        let mut offset = 0;
+        let mut wrote_replacement = false;
+        for (range, value) in values {
+            let value_end = offset + value.len();
+            let overlap_start = start.max(offset);
+            let overlap_end = end.min(value_end);
+            if overlap_start < overlap_end {
+                let Some(span) =
+                    xml_subrange(bytes, range, overlap_start - offset, overlap_end - offset)
+                else {
+                    return false;
+                };
+                edits.push(Edit {
+                    span,
+                    replacement: if wrote_replacement {
+                        Vec::new()
+                    } else {
+                        wrote_replacement = true;
+                        xml_escape(replacement).into_bytes()
+                    },
+                });
+            }
+            offset = value_end;
         }
-        offset = value_end;
+        found |= wrote_replacement;
+        search_start = end;
     }
-    wrote_replacement
+    found
 }
 
 fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>> {
@@ -333,7 +348,7 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
     }
 
     let mut position = 0;
-    let mut instructions = Vec::new();
+    let mut fields = Vec::new();
     while let Some(tag_offset) = text[position..].find('<') {
         let tag_start = position + tag_offset;
         let Some(tag_end) = text[tag_start..].find('>') else {
@@ -341,20 +356,45 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
         };
         let tag_end = tag_start + tag_end;
         let tag = &text[tag_start..=tag_end];
-        if tag.contains("fldSimple") {
+        let element = tag
+            .trim_start_matches('<')
+            .trim_start_matches('/')
+            .trim_end_matches(['>', '/'])
+            .split(|character: char| character.is_ascii_whitespace() || character == '/')
+            .next()
+            .and_then(|name| name.rsplit(':').next());
+        if element == Some("fldChar") {
+            match attribute_value(bytes, tag_start, tag_end, b"fldCharType")
+                .as_ref()
+                .map(|(_, value)| value.as_str())
+            {
+                Some("begin") => fields.push(Vec::new()),
+                Some("end") => {
+                    if let Some(field) = fields.pop() {
+                        groups.push(field);
+                    }
+                }
+                _ => {}
+            }
+        } else if element == Some("fldSimple") {
             if let Some((range, value)) = attribute_value(bytes, tag_start, tag_end, b"instr") {
                 groups.push(vec![(range, value)]);
             }
-        } else if tag.contains("instrText") && !tag.starts_with("</") {
+        } else if element == Some("instrText") && !tag.starts_with("</") {
             let content_start = tag_end + 1;
             if let Some(close) = text[content_start..].find("</") {
                 let content_end = content_start + close;
-                instructions.push((
+                let instruction = (
                     content_start..content_end,
                     xml_unescape(&text[content_start..content_end]),
-                ));
+                );
+                if let Some(field) = fields.last_mut() {
+                    field.push(instruction);
+                } else {
+                    groups.push(vec![instruction]);
+                }
             }
-        } else if (tag.contains(":f") || tag.starts_with("<f")) && !tag.starts_with("</") {
+        } else if element == Some("f") && !tag.starts_with("</") {
             let content_start = tag_end + 1;
             if let Some(close) = text[content_start..].find("</") {
                 let content_end = content_start + close;
@@ -365,9 +405,6 @@ fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>
             }
         }
         position = tag_end + 1;
-    }
-    if !instructions.is_empty() {
-        groups.push(instructions);
     }
     groups
 }
@@ -403,11 +440,9 @@ fn xml_unescape(value: &str) -> String {
 fn xml_subrange(
     bytes: &[u8],
     range: &Range<usize>,
-    value: &str,
-    old: &str,
+    semantic_start: usize,
+    semantic_end: usize,
 ) -> Option<Range<usize>> {
-    let semantic_start = value.find(old)?;
-    let semantic_end = semantic_start + old.len();
     let raw = std::str::from_utf8(&bytes[range.clone()]).ok()?;
     let mut semantic = 0;
     let mut start = None;
@@ -1207,6 +1242,103 @@ mod tests {
             .read_to_string(&mut xml)
             .unwrap();
         assert!(xml.contains("https://new.test/y?a=3&amp;b=4"));
+    }
+
+    #[test]
+    fn ooxml_round_trips_each_repeated_complex_field_url() {
+        let replacement = "https://new.test/y";
+        let original = archive(&[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK &quot;https://old.test/x&quot;</w:instrText><w:fldChar w:fldCharType="end"/></w:p><w:p><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK &quot;https://old.test/x&quot;</w:instrText><w:fldChar w:fldCharType="end"/></w:p></w:body></w:document>"#,
+        )]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Docx,
+            bytes: original.clone(),
+        };
+        let findings = extract(&document)
+            .unwrap()
+            .into_iter()
+            .map(|link| {
+                binary_finding(
+                    DocFormat::Docx,
+                    &link.url,
+                    replacement,
+                    link.source.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 2);
+        let fixed = OoxmlFixer.fix(&original, &findings).unwrap();
+        let links = extract(&SourceDocument {
+            bytes: fixed,
+            ..document
+        })
+        .unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|link| link.url == replacement));
+    }
+
+    #[test]
+    fn ooxml_does_not_splice_unrelated_complex_fields() {
+        let replacement = "https://new.test/y";
+        let first_unrelated = r#"<w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK &quot;https://old.</w:instrText><w:fldChar w:fldCharType="end"/>"#;
+        let second_unrelated = r#"<w:fldChar w:fldCharType="begin"/><w:instrText>test/x&quot;</w:instrText><w:fldChar w:fldCharType="end"/>"#;
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p>{first_unrelated}</w:p><w:p>{second_unrelated}</w:p><w:p><w:hyperlink r:id="r"/></w:p></w:body></w:document>"#
+        );
+        let original = archive(&[
+            ("word/document.xml", &xml),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r" Type="hyperlink" TargetMode="External" Target="https://old.test/x"/></Relationships>"#,
+            ),
+        ]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Docx,
+            bytes: original.clone(),
+        };
+        let findings = extract(&document)
+            .unwrap()
+            .into_iter()
+            .filter(|link| link.url == "https://old.test/x")
+            .map(|link| {
+                binary_finding(
+                    DocFormat::Docx,
+                    &link.url,
+                    replacement,
+                    link.source.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 1);
+        let fixed = OoxmlFixer.fix(&original, &findings).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(fixed.clone())).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert_eq!(
+            xml,
+            format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p>{first_unrelated}</w:p><w:p>{second_unrelated}</w:p><w:p><w:hyperlink r:id="r"/></w:p></w:body></w:document>"#
+            )
+        );
+        let links = extract(&SourceDocument {
+            bytes: fixed,
+            ..document
+        })
+        .unwrap();
+        assert_eq!(
+            links
+                .iter()
+                .map(|link| link.url.as_str())
+                .collect::<Vec<_>>(),
+            ["https://old.", replacement]
+        );
     }
 
     #[test]
