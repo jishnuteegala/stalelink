@@ -209,7 +209,7 @@ fn dest_in_definition(text: &str, def_span: &Range<usize>) -> Option<Range<usize
         bare_dest(dest_start, rest)
     }
 }
-// `<...>` destination: spans from `<` to the first unescaped `>`.
+// `<...>` destination: the angle delimiters are syntax, not URL bytes.
 fn angle_dest(open: usize, rest: &str) -> Option<Range<usize>> {
     let mut escaped = false;
     for (i, c) in rest.char_indices() {
@@ -218,7 +218,7 @@ fn angle_dest(open: usize, rest: &str) -> Option<Range<usize>> {
         } else if c == '\\' {
             escaped = true;
         } else if c == '>' && i > 0 {
-            return Some(open..open + i + 1);
+            return Some(open + 1..open + i);
         }
     }
     None
@@ -1278,7 +1278,7 @@ mod tests {
         let span = found.source.byte_span.clone().unwrap();
         assert_eq!(
             &doc.bytes[span.start as usize..span.end as usize],
-            b"<https://example.test/a b>"
+            b"https://example.test/a b"
         );
     }
     #[test]
