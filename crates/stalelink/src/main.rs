@@ -858,6 +858,44 @@ mod tests {
         assert_eq!(fs::read(path).unwrap(), original);
     }
 
+    #[test]
+    fn failed_verification_restores_binary_document_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.docx");
+        let original = b"PK\x03\x04binary OOXML bytes\0\xff";
+        fs::write(&path, original).unwrap();
+
+        let result = write_in_place(
+            &path,
+            original,
+            b"PK\x03\x04fixed OOXML bytes",
+            false,
+            |_| Err("failed verification".into()),
+        );
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_verification_restores_pdf_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.pdf");
+        let original = b"%PDF-1.4\noriginal PDF bytes\0\xff\n%%EOF\n";
+        fs::write(&path, original).unwrap();
+
+        let result = write_in_place(
+            &path,
+            original,
+            b"%PDF-1.4\nfixed PDF bytes\n%%EOF\n",
+            false,
+            |_| Err("failed verification".into()),
+        );
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
     #[cfg(windows)]
     #[test]
     fn in_place_write_preserves_windows_readonly_attribute() {

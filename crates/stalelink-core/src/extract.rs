@@ -382,6 +382,26 @@ impl Extractor for PdfExtractor {
     fn extract(&self, doc: &SourceDocument) -> Result<Vec<FoundLink>, ExtractError> {
         let pdf = lopdf::Document::load_mem(&doc.bytes)
             .map_err(|error| ExtractError(error.to_string()))?;
+        if pdf.is_encrypted() {
+            // lopdf does not expose encrypted annotations without decryption. Surface raw
+            // candidates solely so `fix` can refuse the document with its security reason.
+            let mut finder = LinkFinder::new();
+            finder.kinds(&[LinkKind::Url]);
+            return Ok(finder
+                .links(&String::from_utf8_lossy(&doc.bytes))
+                .filter(|found| is_http(found.as_str()))
+                .map(|found| {
+                    binary_link(
+                        doc,
+                        found.as_str(),
+                        Location::Pdf {
+                            page: 1,
+                            annotation: None,
+                        },
+                    )
+                })
+                .collect());
+        }
         let mut links = Vec::new();
         for (page_number, page_id) in pdf.get_pages() {
             let annotations = pdf

@@ -126,6 +126,14 @@ impl Fixer for OoxmlFixer {
 
 impl Fixer for PdfFixer {
     fn fix(&self, original: &[u8], findings: &[Finding]) -> Result<Vec<u8>, FixError> {
+        let document = lopdf::Document::load_mem(original)
+            .map_err(|error| FixError(format!("reading PDF: {error}")))?;
+        if document.is_encrypted() {
+            return Err(FixError("encrypted PDF files are not modified".into()));
+        }
+        if signed_pdf(&document) {
+            return Err(FixError("signed PDF files are not modified".into()));
+        }
         if findings.iter().any(|finding| {
             matches!(
                 finding.source.location,
@@ -136,14 +144,6 @@ impl Fixer for PdfFixer {
             )
         }) {
             return Err(FixError("bare PDF text URLs require manual editing".into()));
-        }
-        let document = lopdf::Document::load_mem(original)
-            .map_err(|error| FixError(format!("reading PDF: {error}")))?;
-        if document.is_encrypted() {
-            return Err(FixError("encrypted PDF files are not modified".into()));
-        }
-        if signed_pdf(&document) {
-            return Err(FixError("signed PDF files are not modified".into()));
         }
         let annotation_ids = document
             .objects
@@ -260,12 +260,22 @@ fn replace_urls(
                 position = start + old.len();
                 continue;
             }
+            let replacement = xml_escape(replacement);
             fixed.splice(start..start + old.len(), replacement.bytes());
             position = start + replacement.len();
             changed[index] = true;
         }
     }
     fixed
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn signed_pdf(document: &lopdf::Document) -> bool {
