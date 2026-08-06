@@ -671,8 +671,7 @@ fn write_in_place(
         .map_err(|error| format!("preserving permissions: {error}"))?;
     #[cfg(windows)]
     {
-        // MoveFileEx cannot replace a read-only destination. The replacement
-        // already carries the original attribute and restores it atomically.
+        // MoveFileEx cannot replace a read-only destination.
         let mut writable = original_permissions.clone();
         #[allow(clippy::permissions_set_readonly_false)]
         writable.set_readonly(false);
@@ -681,18 +680,44 @@ fn write_in_place(
     }
     temporary.persist(path).map_err(|error| {
         #[cfg(windows)]
-        let _ = fs::set_permissions(path, original_permissions);
+        let _ = fs::set_permissions(path, original_permissions.clone());
         format!("replacing original: {}", error.error)
+    })?;
+    fs::set_permissions(path, original_permissions.clone()).map_err(|error| {
+        restore_original(path, original, &original_permissions)
+            .err()
+            .map_or_else(
+                || format!("restoring permissions after replacement: {error}"),
+                |restore| format!("restoring permissions after replacement: {error}; {restore}"),
+            )
     })?;
     let result = fs::read(path)
         .map_err(|error| format!("reading written file: {error}"))
         .and_then(|written| verify(&written));
     if let Err(error) = result {
-        fs::write(path, original)
-            .map_err(|restore| format!("{error}; restoring original: {restore}"))?;
+        restore_original(path, original, &original_permissions)
+            .map_err(|restore| format!("{error}; {restore}"))?;
         return Err(error);
     }
     Ok(())
+}
+
+fn restore_original(
+    path: &Path,
+    original: &[u8],
+    permissions: &fs::Permissions,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let mut writable = permissions.clone();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        fs::set_permissions(path, writable)
+            .map_err(|error| format!("making original writable: {error}"))?;
+    }
+    fs::write(path, original).map_err(|error| format!("restoring original bytes: {error}"))?;
+    fs::set_permissions(path, permissions.clone())
+        .map_err(|error| format!("restoring original permissions: {error}"))
 }
 
 fn verify_fixed(
@@ -817,6 +842,41 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "failed verification");
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn in_place_write_preserves_windows_readonly_attribute() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("readonly.txt");
+        fs::write(&path, b"original").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        write_in_place(&path, b"original", b"fixed", false, |_| Ok(())).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"fixed");
+        assert!(fs::metadata(path).unwrap().permissions().readonly());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_verification_restores_windows_readonly_attribute() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("readonly.txt");
+        fs::write(&path, b"original").unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+
+        let result = write_in_place(&path, b"original", b"fixed", false, |_| {
+            Err("failed verification".into())
+        });
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert!(fs::metadata(path).unwrap().permissions().readonly());
     }
 
     #[cfg(unix)]

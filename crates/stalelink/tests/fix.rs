@@ -187,6 +187,9 @@ async fn write_preserves_markdown_and_html_syntax_outside_url_values() {
     );
     assert_eq!(
         fs::read_to_string(&html).unwrap(),
-        format!("<A HREF = '{new}' data-x = \"keep\"><img SRC={new}><link href=\"{new}\"></A>")
+        format!(
+            "<A HREF = '{new}' data-x = \"keep\"><img SRC={}/new?x&#61;1&amp;y&#61;2><link href=\"{new}\"></A>",
+            server.uri()
+        )
     );
 }
