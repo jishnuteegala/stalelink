@@ -276,6 +276,34 @@ fn clean_sarif_records_a_successful_zero_exit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn json_retains_scan_totals_but_counts_only_confidence_filtered_findings() {
+    let (directory, _) = mixed_fixture().await;
+    let mut command = util::command();
+    command.args([
+        "scan",
+        "--no-cache",
+        "--retries",
+        "0",
+        "--format",
+        "json",
+        "--min-confidence",
+        "dead-certain",
+        directory.path().to_str().unwrap(),
+    ]);
+    let output = tokio::task::block_in_place(|| command.assert())
+        .code(1)
+        .stderr("")
+        .get_output()
+        .clone();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["run"]["files_scanned"], 1);
+    assert_eq!(report["run"]["links_checked"], 2);
+    assert_eq!(report["run"]["links_unique"], 2);
+    assert_eq!(report["run"]["findings_by_confidence"]["dead_certain"], 1);
+    assert_eq!(report["run"]["findings_by_confidence"]["outdated"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn formats_share_minimum_confidence_filtering() {
     let (directory, server) = mixed_fixture().await;
     let expected_url = format!("{}/missing", server.uri());
