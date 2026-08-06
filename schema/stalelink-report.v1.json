@@ -12,24 +12,82 @@
       "required": ["files_scanned", "links_checked", "links_unique", "findings_by_confidence", "duration_ms"],
       "additionalProperties": false,
       "properties": {
-        "files_scanned": { "type": "integer", "minimum": 0 },
-        "links_checked": { "type": "integer", "minimum": 0 },
-        "links_unique": { "type": "integer", "minimum": 0 },
+        "files_scanned": { "type": "integer", "minimum": 0, "description": "Pre-filter scan total." },
+        "links_checked": { "type": "integer", "minimum": 0, "description": "Pre-filter scan total." },
+        "links_unique": { "type": "integer", "minimum": 0, "description": "Pre-filter scan total." },
         "duration_ms": { "type": "integer", "minimum": 0 },
-        "findings_by_confidence": {
-          "type": "object",
-          "required": ["dead_certain", "likely_dead", "auth_walled", "outdated", "suspect"],
-          "additionalProperties": false,
-          "properties": {
-            "dead_certain": { "type": "integer", "minimum": 0 },
-            "likely_dead": { "type": "integer", "minimum": 0 },
-            "auth_walled": { "type": "integer", "minimum": 0 },
-            "outdated": { "type": "integer", "minimum": 0 },
-            "suspect": { "type": "integer", "minimum": 0 }
-          }
-        }
+        "findings_by_confidence": { "$ref": "#/$defs/ConfidenceCounts", "description": "Counts of rendered, post-filter findings." }
       }
     },
-    "findings": { "type": "array", "items": { "type": "object" } }
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/Finding" } }
+  },
+  "$defs": {
+    "ConfidenceCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["dead_certain", "likely_dead", "auth_walled", "outdated", "suspect"],
+      "properties": {
+        "dead_certain": { "type": "integer", "minimum": 0 }, "likely_dead": { "type": "integer", "minimum": 0 },
+        "auth_walled": { "type": "integer", "minimum": 0 }, "outdated": { "type": "integer", "minimum": 0 },
+        "suspect": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Finding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["url", "resolved_url", "source", "verdict", "fix"],
+      "properties": {
+        "url": { "type": "string" }, "resolved_url": { "type": ["string", "null"] },
+        "source": { "$ref": "#/$defs/SourceRef" }, "verdict": { "$ref": "#/$defs/Verdict" },
+        "fix": { "anyOf": [{ "$ref": "#/$defs/SuggestedFix" }, { "type": "null" }] }
+      }
+    },
+    "SourceRef": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "format", "location", "byte_span"],
+      "properties": {
+        "path": { "type": "string" }, "format": { "enum": ["pdf", "docx", "xlsx", "pptx", "markdown", "html", "text"] },
+        "location": { "$ref": "#/$defs/Location" },
+        "byte_span": { "anyOf": [{ "$ref": "#/$defs/ByteSpan" }, { "type": "null" }] }
+      }
+    },
+    "ByteSpan": {
+      "type": "object", "additionalProperties": false, "required": ["start", "end"],
+      "properties": { "start": { "type": "integer", "minimum": 0 }, "end": { "type": "integer", "minimum": 0 } }
+    },
+    "Location": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["type", "page", "annotation"], "properties": { "type": { "const": "pdf" }, "page": { "type": "integer", "minimum": 0 }, "annotation": { "type": ["integer", "null"], "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "paragraph"], "properties": { "type": { "const": "docx" }, "paragraph": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "sheet", "cell"], "properties": { "type": { "const": "xlsx" }, "sheet": { "type": "string" }, "cell": { "type": "string" } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "slide"], "properties": { "type": { "const": "pptx" }, "slide": { "type": "integer", "minimum": 0 } } },
+        { "type": "object", "additionalProperties": false, "required": ["type", "line", "column"], "properties": { "type": { "const": "text" }, "line": { "type": "integer", "minimum": 0 }, "column": { "type": "integer", "minimum": 0 } } }
+      ]
+    },
+    "Verdict": {
+      "type": "object", "additionalProperties": false,
+      "required": ["confidence", "reason", "evidence", "checked_at", "tier"],
+      "properties": {
+        "confidence": { "enum": ["dead-certain", "likely-dead", "auth-walled", "outdated", "suspect"] },
+        "reason": { "$ref": "#/$defs/Reason" }, "evidence": { "type": "array", "items": { "$ref": "#/$defs/Evidence" } },
+        "checked_at": { "type": "string", "format": "date-time" }, "tier": { "type": "integer", "minimum": 0, "maximum": 255 }
+      }
+    },
+    "Reason": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind", "detail"], "properties": { "kind": { "const": "http-status" }, "detail": { "type": "integer", "minimum": 0, "maximum": 65535 } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "detail"], "properties": { "kind": { "const": "network-error" }, "detail": { "enum": ["dns", "tls", "timeout", "conn-refused", "other"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["soft-404", "login-wall", "permanent-redirect", "staleness-banner", "version-drift", "far-past-last-modified", "anomalous-response", "local-missing", "syntax-invalid"] } } }
+      ]
+    },
+    "Evidence": { "type": "object", "additionalProperties": false, "required": ["kind", "detail"], "properties": { "kind": { "type": "string" }, "detail": { "type": "string" } } },
+    "SuggestedFix": {
+      "type": "object", "additionalProperties": false, "required": ["replacement_url", "origin", "fixable"],
+      "properties": { "replacement_url": { "type": "string" }, "origin": { "enum": ["redirect-target", "version-upgrade", "https-upgrade"] }, "fixable": { "$ref": "#/$defs/Fixability" } }
+    },
+    "Fixability": {
+      "oneOf": [
+        { "type": "object", "additionalProperties": false, "required": ["kind"], "properties": { "kind": { "enum": ["auto", "manual"] } } },
+        { "type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": { "kind": { "const": "refused" }, "reason": { "type": "string" } } }
+      ]
+    }
   }
 }

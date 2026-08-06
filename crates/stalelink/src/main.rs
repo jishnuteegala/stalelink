@@ -489,27 +489,29 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     } else {
         args.common.output.format
     };
+    let exit_code = if failed { 1 } else { CLEAN };
     let result = if let Some(path) = args.common.output.output {
-        File::create(path).and_then(|file| write_report(file, format, &report))
+        File::create(path).and_then(|file| write_report(file, format, &report, exit_code))
     } else {
-        write_report(io::stdout(), format, &report)
+        write_report(io::stdout(), format, &report, exit_code)
     };
     if let Err(error) = result {
         eprintln!("error: writing report: {error}");
         return ExitCode::from(ENVIRONMENT);
     }
-    ExitCode::from(if failed { 1 } else { CLEAN })
+    ExitCode::from(exit_code)
 }
 
 fn write_report(
     mut writer: impl Write,
     format: OutputFormat,
     report: &stalelink_core::scan::ScanReport,
+    exit_code: u8,
 ) -> io::Result<()> {
     match format {
         OutputFormat::Table => TableSink(&mut writer).emit(report),
         OutputFormat::Json => output::write_json(&mut writer, report),
-        OutputFormat::Sarif => output::write_sarif(&mut writer, report),
+        OutputFormat::Sarif => output::write_sarif(&mut writer, report, exit_code),
     }
 }
 

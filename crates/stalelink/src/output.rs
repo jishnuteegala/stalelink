@@ -6,6 +6,7 @@ use stalelink_core::{
     model::{Confidence, DocFormat, Finding, Location, Reason},
     scan::ScanReport,
 };
+use url::Url;
 
 pub fn write_json(writer: &mut impl io::Write, report: &ScanReport) -> io::Result<()> {
     serde_json::to_writer_pretty(&mut *writer, &JsonReport::from(report))
@@ -13,7 +14,11 @@ pub fn write_json(writer: &mut impl io::Write, report: &ScanReport) -> io::Resul
     writeln!(writer)
 }
 
-pub fn write_sarif(writer: &mut impl io::Write, report: &ScanReport) -> io::Result<()> {
+pub fn write_sarif(
+    writer: &mut impl io::Write,
+    report: &ScanReport,
+    exit_code: u8,
+) -> io::Result<()> {
     let rules = report
         .findings
         .iter()
@@ -28,6 +33,7 @@ pub fn write_sarif(writer: &mut impl io::Write, report: &ScanReport) -> io::Resu
         "version": "2.1.0",
         "runs": [{
             "tool": { "driver": { "name": "stalelink", "version": env!("CARGO_PKG_VERSION"), "rules": rules } },
+            "invocations": [{ "executionSuccessful": true, "exitCode": exit_code }],
             "results": results,
         }],
     });
@@ -139,8 +145,8 @@ fn sarif_result(finding: &Finding) -> Value {
                     "artifactLocation": { "uri": artifact_uri(&finding.source.path) },
                     "replacements": [{
                         "deletedRegion": {
-                            "charOffset": span.start,
-                            "charLength": span.end - span.start,
+                            "byteOffset": span.start,
+                            "byteLength": span.end - span.start,
                         },
                         "insertedContent": { "text": fix.replacement_url },
                     }],
@@ -166,11 +172,20 @@ fn sarif_location(finding: &Finding) -> Value {
 }
 
 fn artifact_uri(path: &Path) -> String {
-    let path = path.to_string_lossy().replace('\\', "/");
-    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
-        format!("file:///{path}")
+    if path.is_absolute() {
+        Url::from_file_path(path)
+            .expect("absolute source path must convert to a file URI")
+            .into()
     } else {
-        path
+        // Encode through an absolute sentinel, then remove it to retain SARIF's
+        // relative URI behavior. Url::set_path intentionally preserves '%' here.
+        let sentinel = Path::new(r"C:\stalelink-relative");
+        let uri = Url::from_file_path(sentinel.join(path))
+            .expect("sentinel source path must convert to a file URI");
+        uri.as_str()
+            .strip_prefix("file:///C:/stalelink-relative/")
+            .expect("sentinel URI has its prefix")
+            .to_owned()
     }
 }
 
@@ -276,7 +291,7 @@ mod tests {
             duration: Duration::ZERO,
         };
         let mut output = Vec::new();
-        write_sarif(&mut output, &report).unwrap();
+        write_sarif(&mut output, &report, 1).unwrap();
         let sarif: Value = serde_json::from_slice(&output).unwrap();
         let result = &sarif["runs"][0]["results"][0];
         assert_eq!(
@@ -319,15 +334,138 @@ mod tests {
             duration: Duration::ZERO,
         };
         let mut output = Vec::new();
-        write_sarif(&mut output, &report).unwrap();
+        write_sarif(&mut output, &report, 1).unwrap();
         let sarif: Value = serde_json::from_slice(&output).unwrap();
         let replacement =
             &sarif["runs"][0]["results"][0]["fixes"][0]["artifactChanges"][0]["replacements"][0];
-        assert_eq!(replacement["deletedRegion"]["charOffset"], 1);
-        assert_eq!(replacement["deletedRegion"]["charLength"], 23);
+        assert_eq!(replacement["deletedRegion"]["byteOffset"], 1);
+        assert_eq!(replacement["deletedRegion"]["byteLength"], 23);
         assert_eq!(
             replacement["insertedContent"]["text"],
             "https://example.test/new"
         );
+    }
+
+    #[test]
+    fn artifact_uris_encode_special_characters_and_round_trip_absolute_paths() {
+        let path = PathBuf::from(r"C:\docs space\hash#percent%\unicode-ß.md");
+        let uri = artifact_uri(&path);
+        assert_eq!(
+            uri,
+            "file:///C:/docs%20space/hash%23percent%25/unicode-%C3%9F.md"
+        );
+        assert_eq!(Url::parse(&uri).unwrap().to_file_path().unwrap(), path);
+
+        assert_eq!(
+            artifact_uri(Path::new(r"docs space\hash#percent%\unicode-ß.md")),
+            "docs%20space/hash%23percent%25/unicode-%C3%9F.md"
+        );
+    }
+
+    #[test]
+    fn sarif_fix_uses_utf8_byte_offsets() {
+        let document = "é [old](http://example.test/old)";
+        let old_url = "http://example.test/old";
+        let start = document.find(old_url).unwrap() as u64;
+        let report = ScanReport {
+            findings: vec![Finding {
+                url: old_url.into(),
+                resolved_url: None,
+                source: SourceRef {
+                    path: PathBuf::from("note.md"),
+                    format: DocFormat::Markdown,
+                    location: Location::Text { line: 1, column: 9 },
+                    byte_span: Some(start..start + old_url.len() as u64),
+                },
+                verdict: Verdict {
+                    confidence: Confidence::Outdated,
+                    reason: Reason::PermanentRedirect,
+                    evidence: vec![],
+                    checked_at: Utc::now(),
+                    tier: 1,
+                },
+                fix: Some(SuggestedFix {
+                    replacement_url: "https://example.test/new".into(),
+                    origin: FixOrigin::RedirectTarget,
+                    fixable: Fixability::Auto,
+                }),
+            }],
+            files_scanned: 1,
+            links_checked: 1,
+            links_unique: 1,
+            duration: Duration::ZERO,
+        };
+        let mut output = Vec::new();
+        write_sarif(&mut output, &report, 1).unwrap();
+        let sarif: Value = serde_json::from_slice(&output).unwrap();
+        let region = &sarif["runs"][0]["results"][0]["fixes"][0]["artifactChanges"][0]["replacements"]
+            [0]["deletedRegion"];
+        let offset = region["byteOffset"].as_u64().unwrap() as usize;
+        let length = region["byteLength"].as_u64().unwrap() as usize;
+        let replacement = sarif["runs"][0]["results"][0]["fixes"][0]["artifactChanges"][0]
+            ["replacements"][0]["insertedContent"]["text"]
+            .as_str()
+            .unwrap();
+        let mut bytes = document.as_bytes().to_vec();
+        bytes.splice(offset..offset + length, replacement.bytes());
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "é [old](https://example.test/new)"
+        );
+    }
+
+    #[test]
+    fn sarif_records_completed_scan_exit_code() {
+        let report = ScanReport {
+            findings: vec![],
+            files_scanned: 1,
+            links_checked: 0,
+            links_unique: 0,
+            duration: Duration::ZERO,
+        };
+        let mut output = Vec::new();
+        write_sarif(&mut output, &report, 0).unwrap();
+        let sarif: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            sarif["runs"][0]["invocations"][0]["executionSuccessful"],
+            true
+        );
+        assert_eq!(sarif["runs"][0]["invocations"][0]["exitCode"], 0);
+    }
+
+    #[test]
+    fn json_totals_are_pre_filter_while_confidence_counts_are_rendered_findings() {
+        let report = ScanReport {
+            findings: vec![Finding {
+                url: "https://example.test/missing".into(),
+                resolved_url: None,
+                source: SourceRef {
+                    path: PathBuf::from("note.md"),
+                    format: DocFormat::Markdown,
+                    location: Location::Text { line: 1, column: 1 },
+                    byte_span: None,
+                },
+                verdict: Verdict {
+                    confidence: Confidence::DeadCertain,
+                    reason: Reason::HttpStatus(404),
+                    evidence: vec![],
+                    checked_at: Utc::now(),
+                    tier: 1,
+                },
+                fix: None,
+            }],
+            files_scanned: 4,
+            links_checked: 5,
+            links_unique: 3,
+            duration: Duration::ZERO,
+        };
+        let mut output = Vec::new();
+        write_json(&mut output, &report).unwrap();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["run"]["files_scanned"], 4);
+        assert_eq!(json["run"]["links_checked"], 5);
+        assert_eq!(json["run"]["links_unique"], 3);
+        assert_eq!(json["run"]["findings_by_confidence"]["dead_certain"], 1);
+        assert_eq!(json["run"]["findings_by_confidence"]["likely_dead"], 0);
     }
 }
