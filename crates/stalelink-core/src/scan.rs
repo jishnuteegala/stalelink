@@ -33,6 +33,8 @@ pub struct ScanInput {
 }
 pub struct ScanReport {
     pub findings: Vec<Finding>,
+    /// The exact paths selected by the walk before extraction and checking.
+    pub resolved_paths: Vec<PathBuf>,
     pub files_scanned: usize,
     pub links_checked: usize,
     pub links_unique: usize,
@@ -131,6 +133,7 @@ pub async fn scan(
     Ok(ScanReport {
         findings,
         files_scanned: paths.len(),
+        resolved_paths: paths,
         links_checked: checked,
         links_unique: unique + local_unique,
         duration: started.elapsed(),

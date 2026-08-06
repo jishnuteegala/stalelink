@@ -33,8 +33,28 @@ impl VerdictCache {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("creating cache directory: {error}"))?;
         }
+        // Concurrent first-opens can race WAL recovery on macOS and surface
+        // transient SQLITE_IOERR, which busy_timeout does not cover; retry.
+        let mut attempts = 0;
+        let connection = loop {
+            match Self::open_connection(&path) {
+                Ok(connection) => break connection,
+                Err(error) if attempts < 5 && transient(&error) => {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        Ok(Self {
+            path,
+            connection: Mutex::new(connection),
+        })
+    }
+
+    fn open_connection(path: &Path) -> Result<Connection, String> {
         let connection =
-            Connection::open(&path).map_err(|error| format!("opening cache: {error}"))?;
+            Connection::open(path).map_err(|error| format!("opening cache: {error}"))?;
         // Wait out cross-process contention instead of surfacing SQLITE_BUSY.
         connection
             .busy_timeout(Duration::from_secs(10))
@@ -69,10 +89,7 @@ impl VerdictCache {
         connection
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|error| error.to_string())?;
-        Ok(Self {
-            path,
-            connection: Mutex::new(connection),
-        })
+        Ok(connection)
     }
 
     pub fn clear(path: &Path) -> Result<(), String> {
@@ -279,6 +296,10 @@ pub fn normalised_url(url: &Url) -> String {
     }
     url.set_fragment(None);
     url.to_string()
+}
+
+fn transient(error: &str) -> bool {
+    error.contains("disk I/O error") || error.contains("database is locked")
 }
 
 fn unix_seconds() -> u64 {

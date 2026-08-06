@@ -17,11 +17,11 @@ use regex::Regex;
 use stalelink_core::{
     check::HttpChecker,
     extract::{SourceDocument, extract},
-    fix::fixer_for,
+    fix::{fixer_for, pdf_refusal},
     model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
     report::{ReportSink, TableSink},
     scan::{NoProgress, Progress, ScanInput, scan},
-    walk::WalkOptions,
+    walk::{WalkOptions, detect_format},
 };
 use tempfile::NamedTempFile;
 
@@ -219,7 +219,7 @@ enum Browser {
     Firefox,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FixExclude {
     Pdf,
     Redirect,
@@ -520,28 +520,29 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
         Err(exit_code) => return ExitCode::from(exit_code),
     };
     let minimum = Confidence::from(args.min_fix_confidence);
+    let (preflight_refused, mut refused) = preflight_pdfs(&args, &report.resolved_paths);
     let mut by_path: BTreeMap<PathBuf, Vec<Finding>> = BTreeMap::new();
-    let mut refused = 0usize;
     for finding in report.findings {
         let Some(fix) = &finding.fix else { continue };
-        if finding.verdict.confidence < minimum || excluded(fix.origin, &args.fix_exclude) {
+        if finding.verdict.confidence < minimum
+            || excluded(finding.source.format, fix.origin, &args.fix_exclude)
+        {
             continue;
         }
         if !matches!(fix.fixable, Fixability::Auto) {
             eprintln!(
-                "skipped {}: fix is not automatic",
-                finding.source.path.display()
+                "refused {}: {}",
+                finding.source.path.display(),
+                match &fix.fixable {
+                    Fixability::Manual => "fix requires manual editing",
+                    Fixability::Refused { reason } => reason,
+                    Fixability::Auto => unreachable!("handled above"),
+                }
             );
             refused += 1;
             continue;
         }
-        if fixer_for(finding.source.format).is_none() {
-            eprintln!(
-                "skipped {}: {:?} fixes are not supported yet",
-                finding.source.path.display(),
-                finding.source.format
-            );
-            refused += 1;
+        if preflight_refused.contains(&finding.source.path) {
             continue;
         }
         by_path
@@ -571,7 +572,14 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
             }
         };
         if !args.write && !args.copy {
-            print_diff(&path, &original, &fixed);
+            if matches!(
+                format,
+                DocFormat::Pdf | DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx
+            ) {
+                print_binary_summary(&path, &findings);
+            } else {
+                print_diff(&path, &original, &fixed);
+            }
             continue;
         }
         let destination = if args.copy {
@@ -598,14 +606,51 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
     ExitCode::from(if refused == 0 { CLEAN } else { 1 })
 }
 
-fn excluded(origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
+fn excluded(format: DocFormat, origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
     exclusions.iter().any(|exclusion| match exclusion {
-        FixExclude::Pdf => false,
+        FixExclude::Pdf => format == DocFormat::Pdf,
         FixExclude::Redirect => origin == FixOrigin::RedirectTarget,
         FixExclude::UrlUpgrade => {
             matches!(origin, FixOrigin::HttpsUpgrade | FixOrigin::VersionUpgrade)
         }
     })
+}
+
+fn preflight_pdfs(
+    args: &FixArgs,
+    paths: &[PathBuf],
+) -> (std::collections::HashSet<PathBuf>, usize) {
+    if args.fix_exclude.contains(&FixExclude::Pdf) {
+        return (std::collections::HashSet::new(), 0);
+    };
+    let mut refused = 0;
+    let mut refused_paths = std::collections::HashSet::new();
+    for path in paths {
+        let Ok(bytes) = fs::read(path) else { continue };
+        if detect_format(path, &bytes) != Some(DocFormat::Pdf) {
+            continue;
+        }
+        let result = lopdf::Document::load_mem(&bytes)
+            .map_err(|error| format!("reading PDF: {error}"))
+            .and_then(|document| pdf_refusal(&document).map_err(|error| error.0));
+        if let Err(error) = result {
+            eprintln!("refused {}: {error}", path.display());
+            refused += 1;
+            refused_paths.insert(path.clone());
+        }
+    }
+    (refused_paths, refused)
+}
+
+fn print_binary_summary(path: &Path, findings: &[Finding]) {
+    for finding in findings {
+        let replacement = &finding
+            .fix
+            .as_ref()
+            .expect("selected finding has a fix")
+            .replacement_url;
+        println!("{}: {} -> {}", path.display(), finding.url, replacement);
+    }
 }
 
 fn print_diff(path: &Path, original: &[u8], fixed: &[u8]) {
@@ -839,6 +884,44 @@ mod tests {
         let result = write_in_place(&path, original, b"fixed", false, |_| {
             Err("failed verification".into())
         });
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_verification_restores_binary_document_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.docx");
+        let original = b"PK\x03\x04binary OOXML bytes\0\xff";
+        fs::write(&path, original).unwrap();
+
+        let result = write_in_place(
+            &path,
+            original,
+            b"PK\x03\x04fixed OOXML bytes",
+            false,
+            |_| Err("failed verification".into()),
+        );
+
+        assert_eq!(result.unwrap_err(), "failed verification");
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[test]
+    fn failed_verification_restores_pdf_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.pdf");
+        let original = b"%PDF-1.4\noriginal PDF bytes\0\xff\n%%EOF\n";
+        fs::write(&path, original).unwrap();
+
+        let result = write_in_place(
+            &path,
+            original,
+            b"%PDF-1.4\nfixed PDF bytes\n%%EOF\n",
+            false,
+            |_| Err("failed verification".into()),
+        );
 
         assert_eq!(result.unwrap_err(), "failed verification");
         assert_eq!(fs::read(path).unwrap(), original);

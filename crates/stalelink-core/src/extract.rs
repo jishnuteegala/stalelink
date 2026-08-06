@@ -382,11 +382,13 @@ impl Extractor for PdfExtractor {
     fn extract(&self, doc: &SourceDocument) -> Result<Vec<FoundLink>, ExtractError> {
         let pdf = lopdf::Document::load_mem(&doc.bytes)
             .map_err(|error| ExtractError(error.to_string()))?;
+        if pdf.is_encrypted() {
+            return Ok(Vec::new());
+        }
         let mut links = Vec::new();
         for (page_number, page_id) in pdf.get_pages() {
-            let annotations = pdf
-                .get_page_annotations(page_id)
-                .map_err(|error| ExtractError(error.to_string()))?;
+            let annotations =
+                page_annotations(&pdf, page_id).map_err(|error| ExtractError(error.to_string()))?;
             for (index, annotation) in annotations.iter().enumerate() {
                 let Ok((_, action)) = annotation
                     .get(b"A")
@@ -450,6 +452,29 @@ impl Extractor for PdfExtractor {
         }
         Ok(links)
     }
+}
+
+fn page_annotations(
+    pdf: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+) -> Result<Vec<&lopdf::Dictionary>, lopdf::Error> {
+    let page = pdf.get_dictionary(page_id)?;
+    let Ok(annotations) = page.get(b"Annots") else {
+        return Ok(Vec::new());
+    };
+    let annotations = match annotations {
+        lopdf::Object::Array(annotations) => annotations,
+        lopdf::Object::Reference(id) => pdf.get_object(*id)?.as_array()?,
+        _ => return Ok(Vec::new()),
+    };
+    Ok(annotations
+        .iter()
+        .filter_map(|annotation| match annotation {
+            lopdf::Object::Dictionary(annotation) => Some(annotation),
+            lopdf::Object::Reference(id) => pdf.get_dictionary(*id).ok(),
+            _ => None,
+        })
+        .collect())
 }
 
 // PDFDocEncoding's undefined bytes reject the entire string rather than silently
@@ -516,6 +541,20 @@ fn pdf_doc_encoding(byte: u8) -> Option<char> {
         0xa0 => '\u{20ac}',
         byte => char::from(byte),
     })
+}
+
+pub fn encode_pdf_string(value: &str) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(value.len());
+    for character in value.chars() {
+        let Some(byte) = (0..=u8::MAX).find(|&byte| pdf_doc_encoding(byte) == Some(character))
+        else {
+            let mut utf16 = vec![0xfe, 0xff];
+            utf16.extend(value.encode_utf16().flat_map(u16::to_be_bytes));
+            return utf16;
+        };
+        encoded.push(byte);
+    }
+    encoded
 }
 
 const ZIP_MEMBER_LIMIT: u64 = 64 * 1024 * 1024;
@@ -624,7 +663,7 @@ fn link_from_field(text: &str) -> Option<&str> {
     let start = rest.find("http")?;
     let url = &rest[start..];
     let end = url
-        .find(|character: char| character.is_whitespace() || matches!(character, '"' | ')' | '&'))
+        .find(|character: char| character.is_whitespace() || matches!(character, '"' | ')'))
         .unwrap_or(url.len());
     let url = &url[..end];
     is_http(url).then_some(url)
@@ -854,6 +893,7 @@ fn extract_xlsx(
         let mut reader = NsReader::from_str(&xml);
         let mut cell = String::new();
         let mut formula = false;
+        let mut formula_text = String::new();
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Start(event))) => {
@@ -863,6 +903,7 @@ fn extract_xlsx(
                     }
                     if resolved_name(&resolved, &event, SPREADSHEET_NS, b"f") {
                         formula = true;
+                        formula_text.clear();
                     }
                     if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink")
                         && let (Some(reference), Some(id)) = (
@@ -905,7 +946,19 @@ fn extract_xlsx(
                         .xml_content()
                         .map_err(|error| ExtractError(error.to_string()))?
                         .replace("&quot;", "\"");
-                    if let Some(url) = link_from_field(&text) {
+                    formula_text.push_str(&text);
+                }
+                Ok((_, XmlEvent::GeneralRef(event))) if formula => {
+                    let reference = event
+                        .decode()
+                        .map_err(|error| ExtractError(error.to_string()))?;
+                    formula_text.push_str(if reference == "quot" { "\"" } else { "&" });
+                }
+                Ok((resolved, XmlEvent::End(event)))
+                    if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
+                        && event.local_name().as_ref() == b"f" =>
+                {
+                    if let Some(url) = link_from_field(&formula_text) {
                         links.push(binary_link(
                             doc,
                             url,
@@ -915,11 +968,6 @@ fn extract_xlsx(
                             },
                         ));
                     }
-                }
-                Ok((resolved, XmlEvent::End(event)))
-                    if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
-                        && event.local_name().as_ref() == b"f" =>
-                {
                     formula = false;
                 }
                 Ok((_, XmlEvent::Eof)) => break,
@@ -1512,6 +1560,31 @@ mod tests {
         );
         assert_eq!(pdf_string(b"https://example.test/\x7f"), None);
         assert_eq!(pdf_string(b"\xfe\xff\0h\0t\0t\0p\0s\0:\xff"), None);
+    }
+
+    #[test]
+    fn encrypted_pdf_does_not_surface_raw_byte_urls() {
+        let bytes = pdf_with_objects(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".into(),
+            "<< /Type /Pages /Kids [] /Count 0 >>".into(),
+            "<< /Filter /Standard /Note (https://raw.test/x) >>".into(),
+        ]);
+        let mut encrypted = bytes;
+        let trailer = encrypted
+            .windows(8)
+            .rposition(|window| window == b"/Root 1 ")
+            .unwrap();
+        encrypted.splice(trailer..trailer, b"/Encrypt 3 0 R ".iter().copied());
+        assert!(
+            lopdf::Document::load_mem(&encrypted)
+                .unwrap()
+                .is_encrypted()
+        );
+        assert!(
+            extract(&binary_document(DocFormat::Pdf, encrypted))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

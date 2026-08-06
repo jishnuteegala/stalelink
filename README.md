@@ -61,13 +61,13 @@ SARIF rule IDs are stable: `SL0001` HTTP status, `SL0002` network error, `SL0003
 
 ## Fixing text links
 
-`stalelink fix <paths>` runs the same scan as `scan` and considers automatic suggested fixes for Markdown, plain text, and HTML. It prints unified diffs to stdout by default and never modifies a file in this mode. A dry run that has pending diffs exits 0 so it is safe for review scripts.
+`stalelink fix <paths>` runs the same scan as `scan` and considers automatic suggested fixes for Markdown, plain text, HTML, DOCX, XLSX, PPTX, and annotation links in PDFs. It prints unified diffs for text files and `<file>: <old-url> -> <replacement-url>` summaries for binary files by default; dry runs never modify a file and exit 0 when all fixes are eligible.
 
 Use `--write` to replace links in place. The replacement is written to a temporary file in the document's directory and renamed into place, then stalelink extracts the resulting document again to confirm every replacement URL is present and every old URL is absent. Failed verification restores the original bytes and exits 1. On Windows, replacing an existing destination requires a remove-then-rename step; the original bytes remain in memory until verification completes so they can be restored if replacement or verification fails.
 
 `--backup` requires `--write` and retains the original at `<file>.bak` (for example, `note.txt.bak`). `--copy` instead creates `<stem>.fixed.<ext>` without modifying the original and conflicts with `--write`; it refuses to overwrite an existing copy. `--min-fix-confidence` defaults to `dead-certain`; redirects are normally `outdated`, so use `--min-fix-confidence outdated` to apply redirect suggestions. Repeat `--fix-exclude redirect` to omit redirect targets or `--fix-exclude url-upgrade` to omit HTTPS and version upgrades.
 
-Binary formats are currently reported as skipped by `fix` and are never modified. Exit code 0 means a dry run completed or all requested text fixes completed, 1 means a fix was refused or verification failed, 2 means invalid arguments/configuration, and 3 means an environment or IO setup failure.
+OOXML fixes byte-splice only matching URLs in XML relationship/document parts. Untouched ZIP entries are raw-copied when they have no ZIP extra metadata; archives with untouched entries carrying extra fields are refused because the ZIP writer cannot guarantee those fields survive reconstruction. PDF annotation changes are append-only incremental updates. PDF bare-text URLs require manual editing, and encrypted or signed PDFs are refused during `fix` preflight even when extraction found no links, so stalelink never invalidates encryption or signatures. `--fix-exclude pdf` excludes only PDF fixes and PDF preflight. Exit code 0 means a dry run completed or all requested fixes completed, 1 means a fix was refused or verification failed, 2 means invalid arguments/configuration, and 3 means an environment or IO setup failure.
 
 ## License
 
