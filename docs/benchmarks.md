@@ -13,18 +13,18 @@ after nine outer process invocations; the parenthesized range is min-max.
 
 | Implementation | Aggregate docs/sec median (min-max) | In-process peak working set (MiB) | Cold completion median ms (min-max) | Cold peak working set (MiB) |
 | --- | ---: | ---: | ---: | ---: |
-| Rust production extraction API | 204.22 (184.75-206.70) | 225.02 | 2,124 (1,988-2,556) | 223.87 |
-| Go throwaway port | 91.31 (80.05-93.76) | 126.54 | 3,877 (3,659-4,162) | 137.60 |
+| Rust production extraction API | 199.02 (195.65-203.19) | 225.02 | 2,110 (2,079-2,159) | 224.01 |
+| Go throwaway port | 90.62 (88.65-92.95) | 146.78 | 3,782 (3,679-4,009) | 122.65 |
 
 | Format | Rust docs/sec median (min-max) | Go docs/sec median (min-max) |
 | --- | ---: | ---: |
-| Markdown | 240.42 (232.73-245.93) | 89.70 (78.53-92.35) |
-| HTML | 203.14 (181.19-226.70) | 76.27 (70.88-82.09) |
-| Plain text | 226.08 (191.99-239.66) | 83.25 (81.49-84.29) |
-| DOCX | 241.19 (207.64-247.83) | 134.45 (124.47-140.80) |
-| XLSX | 226.42 (198.79-243.55) | 128.65 (116.16-134.54) |
-| PPTX | 242.87 (227.17-255.58) | 134.31 (123.96-137.19) |
-| PDF | 223.26 (195.36-227.21) | 86.00 (84.07-87.39) |
+| Markdown | 236.87 (227.07-240.99) | 90.87 (87.18-91.42) |
+| HTML | 215.77 (194.50-217.08) | 83.10 (80.36-84.38) |
+| Plain text | 246.19 (241.66-250.18) | 83.82 (82.94-85.42) |
+| DOCX | 250.06 (240.95-255.88) | 148.82 (143.56-152.14) |
+| XLSX | 246.69 (239.51-249.61) | 137.43 (130.50-138.83) |
+| PPTX | 254.70 (245.14-259.83) | 136.40 (70.40-138.09) |
+| PDF | 222.00 (216.85-225.54) | 86.55 (83.49-86.92) |
 
 Host: Windows 11 Home 10.0.26200 (build 26200), Intel Core i7-11800H at
 2.30 GHz (8 cores, 16 logical processors), 15.68 GiB RAM; rustc 1.89.0 and Go
@@ -72,7 +72,7 @@ memory counter through `GetProcessMemoryInfo` after exit. The reported value is
 
 | Format | Rust production extractor | Go benchmark extractor | Structured comparison |
 | --- | --- | --- | --- |
-| Markdown | `pulldown-cmark` plus byte spans | Goldmark AST plus raw span mapping | URL, text location, raw span |
+| Markdown | `pulldown-cmark` plus byte spans | Goldmark parser-owned definition segments and AST raw span mapping | URL, text location, raw span |
 | HTML | `html5tokenizer` plus byte spans | `x/net/html` tokenizer | URL, text location, raw span |
 | Plain text | `linkify` plus byte spans | HTTP(S) recognizer with explicit boundaries | URL, text location, raw span |
 | DOCX | `zip` plus `quick-xml` | `archive/zip` plus streaming `encoding/xml` | URL and paragraph location |
@@ -84,7 +84,7 @@ memory counter through `GetProcessMemoryInfo` after exit. The reported value is
 
 | Production behavior | Benchmark treatment |
 | --- | --- |
-| Markdown reference definitions and escaped destinations; HTML repeated and entity-decoded destinations | Validation-only fixtures assert raw spans and decoded URLs; excluded from timed synthetic templates. |
+| Markdown reference definitions and escaped destinations; HTML repeated, entity-decoded, and unquoted destinations | Validation-only fixtures assert raw spans and decoded URLs; unquoted HTML attributes are also timed. |
 | DOCX field instructions, multi-sheet formulas, and multi-slide ordering | Validation-only fixtures assert these paths; timed OOXML templates primarily measure relationship links. |
 | Multi-page PDFs with indirect annotations and FlateDecode content | Validation-only fixtures assert these paths; timed PDFs are simpler synthetic streams and annotations. |
 | PDF encryption and non-URI action variants | Excluded from the measured workload on both implementations. |

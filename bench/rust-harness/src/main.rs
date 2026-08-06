@@ -58,7 +58,7 @@ fn generate(directory: &Path) {
                 match copy % 3 {
                     0 => format!("<a href=\"{url}\">Tom &amp; Ada</a>\n"),
                     1 => format!("<link href='{url}' rel=\"alternate\">\n"),
-                    _ => format!("<img src=\"{url}\" alt=\"diagram\">\n"),
+                    _ => format!("<img src={url} alt=\"diagram\">\n"),
                 }
             });
             write_text(directory, "txt", &name, links, &mut seed, |url| {
@@ -75,8 +75,8 @@ fn generate(directory: &Path) {
 fn generate_validation(directory: &Path) {
     let _ = fs::remove_dir_all(directory);
     fs::create_dir_all(directory).unwrap();
-    fs::write(directory.join("spans.md"), "[one](https://repeat.test/a) [two](https://repeat.test/a)\n[escaped](https://escape.test/a\\(b\\))\n[ref]: https://reference.test/a\\(b\\)\n[use][ref]\n").unwrap();
-    fs::write(directory.join("spans.html"), "https://repeat.test/a <a href=\"https://repeat.test/a\">one</a><a href='https://repeat.test/a'>two</a><a href=\"https://entity.test/a?x=1&amp;y=2\">entity</a>").unwrap();
+    fs::write(directory.join("spans.md"), "[one](https://repeat.test/a) [two](https://repeat.test/a)\n[escaped](https://escape.test/a\\(b\\))\n\n[ref]: https://reference.test/a\\(b\\)\n\n[use][ref]\n\n  [bracket\\] label]: https://reference.test/indented \"A title\"\n\n[use][bracket\\] label]\n").unwrap();
+    fs::write(directory.join("spans.html"), "https://repeat.test/a <a href=\"https://repeat.test/a\">one</a><a href='https://repeat.test/a'>two</a><a href=\"https://entity.test/a?x=1&amp;y=2\">entity</a><img src=https://unquoted.test/a alt=diagram>").unwrap();
     write_validation_docx(directory);
     write_validation_xlsx(directory);
     write_validation_pptx(directory);

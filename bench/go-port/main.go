@@ -24,7 +24,9 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 	"golang.org/x/net/html"
 )
 
@@ -286,7 +288,7 @@ func htmlAttributeSpan(raw []byte, want string) (int, int, bool) {
 			}
 			continue
 		}
-		for i < len(raw) && !strings.ContainsRune(" />\t\r\n", rune(raw[i])) {
+		for i < len(raw) && !strings.ContainsRune(" >\t\r\n", rune(raw[i])) {
 			i++
 		}
 		if strings.EqualFold(name, want) {
@@ -300,13 +302,13 @@ func htmlAttributeSpan(raw []byte, want string) (int, int, bool) {
 // Raw destination spans are reconstructed only inside those parser-owned ranges.
 func markdownLinks(doc string, data []byte) []record {
 	source := text.NewReader(data)
-	root := goldmark.DefaultParser().Parse(source)
+	definitions := map[string]markdownDefinition{}
+	markdown := goldmark.New(goldmark.WithParserOptions(parser.WithParagraphTransformers(
+		util.Prioritized(referenceDefinitionCollector{definitions}, 99),
+	)))
+	root := markdown.Parser().Parse(source)
 	var out []record
-	definitions := markdownDefinitions(data)
 	autolinkCursor := map[ast.Node]int{}
-	for _, definition := range definitions {
-		addTextSpan(doc, data, string(data[definition.span[0]:definition.span[1]]), definition.span[0], definition.span[1], &out)
-	}
 	ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -365,32 +367,27 @@ func markdownLinks(doc string, data []byte) []record {
 
 type markdownDefinition struct{ span [2]int }
 
-func markdownDefinitions(data []byte) map[string]markdownDefinition {
-	definitions := map[string]markdownDefinition{}
-	for lineStart := 0; lineStart < len(data); {
-		lineEnd := bytes.IndexByte(data[lineStart:], '\n')
-		if lineEnd < 0 {
-			lineEnd = len(data)
-		} else {
-			lineEnd += lineStart
+// Runs immediately after Goldmark creates reference-definition nodes, before
+// parsing inlines consumes them from the finished AST.
+type referenceDefinitionCollector struct {
+	definitions map[string]markdownDefinition
+}
+
+func (c referenceDefinitionCollector) Transform(node *ast.Paragraph, reader text.Reader, _ parser.Context) {
+	parent := node.Parent()
+	for sibling := parent.FirstChild(); sibling != nil; sibling = sibling.NextSibling() {
+		definition, ok := sibling.(*ast.LinkReferenceDefinition)
+		if !ok {
+			continue
 		}
-		line := data[lineStart:lineEnd]
-		if len(line) > 3 && line[0] == '[' {
-			if close := bytes.IndexByte(line, ']'); close > 0 {
-				i := close + 1
-				for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-					i++
-				}
-				if i < len(line) && line[i] == ':' {
-					if start, end, ok := markdownDestination(data, lineStart, lineEnd); ok {
-						definitions[strings.ToLower(string(line[1:close]))] = markdownDefinition{[2]int{start, end}}
-					}
-				}
+		if lines := definition.Lines(); lines.Len() > 0 {
+			start := definition.Pos()
+			end := lines.At(lines.Len() - 1).Stop
+			if valueStart, valueEnd, ok := markdownDestination(reader.Source(), start, end); ok {
+				c.definitions[strings.ToLower(string(definition.Label))] = markdownDefinition{[2]int{valueStart, valueEnd}}
 			}
 		}
-		lineStart = lineEnd + 1
 	}
-	return definitions
 }
 
 func markdownValue(raw string) string {
