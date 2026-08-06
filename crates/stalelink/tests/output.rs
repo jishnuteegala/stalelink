@@ -108,7 +108,7 @@ fn validate(schema: &str, value: &Value) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_json_scan_validates_against_shipped_schema() {
-    let (directory, _) = fixture().await;
+    let (directory, _server) = fixture().await;
     let output = scan(directory.path(), "json")
         .code(1)
         .stderr("")
@@ -223,7 +223,7 @@ fn schema_validates_every_core_finding_variant_and_optional_form() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_sarif_scan_validates_against_official_schema_and_has_text_region() {
-    let (directory, _) = fixture().await;
+    let (directory, _server) = fixture().await;
     let output = scan(directory.path(), "sarif")
         .code(1)
         .stderr("")
@@ -277,7 +277,7 @@ fn clean_sarif_records_a_successful_zero_exit() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn json_retains_scan_totals_but_counts_only_confidence_filtered_findings() {
-    let (directory, _) = mixed_fixture().await;
+    let (directory, _server) = mixed_fixture().await;
     let mut command = util::command();
     command.args([
         "scan",
@@ -433,7 +433,7 @@ async fn formats_share_minimum_confidence_filtering() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn filters_do_not_change_fail_on_exit_status() {
-    let (directory, _) = outdated_fixture().await;
+    let (directory, _server) = outdated_fixture().await;
     for (fail_on, exit_code) in [("outdated", 1), ("likely-dead", 0)] {
         let mut command = util::command();
         command.args([
