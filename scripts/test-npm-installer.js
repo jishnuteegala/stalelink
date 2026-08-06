@@ -13,6 +13,12 @@ function tarPath(value) {
   return value.replace(/^([A-Z]):\\/i, (_, drive) => `/${drive.toLowerCase()}/`).replaceAll("\\", "/");
 }
 
+// GNU tar treats colons in paths as remote hosts; BSD tar has no --force-local.
+const tarLocalFlags = (() => {
+  const probe = spawnSync("tar", ["--version"], { encoding: "utf8" });
+  return probe.stdout && probe.stdout.includes("GNU tar") ? ["--force-local"] : [];
+})();
+
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
@@ -65,14 +71,14 @@ function makeFakeArtifact(artifact) {
       `Compress-Archive -Path '${contents}\\*' -DestinationPath '${artifact}' -Force`,
     ]);
   } else {
-    run("tar", ["--force-local", "-cJf", tarPath(artifact), "-C", tarPath(temp), "artifact"]);
+    run("tar", [...tarLocalFlags, "-cJf", tarPath(artifact), "-C", tarPath(temp), "artifact"]);
   }
 }
 
 async function main() {
   run("dist", ["build", "--artifacts=global", "--output-format=json"], { cwd: root });
   const installer = path.join(root, "target", "distrib", "stalelink-npm-package.tar.gz");
-  run("tar", ["--force-local", "-xzf", tarPath(installer), "-C", tarPath(temp)]);
+  run("tar", [...tarLocalFlags, "-xzf", tarPath(installer), "-C", tarPath(temp)]);
   run(process.execPath, [process.env.npm_execpath, "pack", "--dry-run"], {
     cwd: packageDir,
   });
