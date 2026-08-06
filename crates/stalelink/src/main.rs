@@ -1,9 +1,11 @@
+mod cache;
+mod config;
+
 use std::{
     fs::File,
     io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     process::ExitCode,
-    time::Duration,
 };
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -130,30 +132,30 @@ struct OutputArgs {
     #[arg(long, value_enum, default_value_t = ConfidenceLevel::Suspect)]
     min_confidence: ConfidenceLevel,
     /// Exit 1 only for findings at or above this confidence
-    #[arg(long, value_enum, default_value_t = ConfidenceLevel::Suspect)]
-    fail_on: ConfidenceLevel,
+    #[arg(long, value_enum)]
+    fail_on: Option<ConfidenceLevel>,
 }
 
 #[derive(Debug, Args)]
 struct NetworkArgs {
     /// Global request concurrency
-    #[arg(long, default_value_t = 128)]
-    max_concurrency: u16,
+    #[arg(long)]
+    max_concurrency: Option<u16>,
     /// Concurrent requests per host
-    #[arg(long, default_value_t = 4)]
-    per_host: u16,
+    #[arg(long)]
+    per_host: Option<u16>,
     /// Per-request timeout in seconds
-    #[arg(long, default_value_t = 20)]
-    timeout: u64,
+    #[arg(long)]
+    timeout: Option<u64>,
     /// Retries per request
-    #[arg(long, default_value_t = 2)]
-    retries: u8,
+    #[arg(long)]
+    retries: Option<u8>,
     /// Custom User-Agent header
     #[arg(long)]
     user_agent: Option<String>,
     /// Cache entry validity window (e.g. 30m, 12h, 7d)
-    #[arg(long, default_value = "24h")]
-    cache_ttl: String,
+    #[arg(long)]
+    cache_ttl: Option<String>,
     /// Bypass the response cache entirely
     #[arg(long)]
     no_cache: bool,
@@ -239,6 +241,21 @@ impl From<ConfidenceLevel> for Confidence {
     }
 }
 
+impl std::str::FromStr for ConfidenceLevel {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "dead-certain" => Ok(Self::DeadCertain),
+            "likely-dead" => Ok(Self::LikelyDead),
+            "auth-walled" => Ok(Self::AuthWalled),
+            "outdated" => Ok(Self::Outdated),
+            "suspect" => Ok(Self::Suspect),
+            _ => Err(()),
+        }
+    }
+}
+
 struct StderrProgress;
 impl Progress for StderrProgress {
     fn files_walked(&self, count: usize) {
@@ -275,7 +292,8 @@ fn run(cli: Cli) -> ExitCode {
             ExitCode::from(CLEAN)
         }
         Command::Scan(args) => run_scan(args, cli.quiet),
-        Command::Fix(_) | Command::Cache { .. } => {
+        Command::Cache { command } => run_cache(command),
+        Command::Fix(_) => {
             eprintln!("error: not implemented yet");
             ExitCode::from(ENVIRONMENT)
         }
@@ -283,29 +301,6 @@ fn run(cli: Cli) -> ExitCode {
 }
 
 fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
-    if args.common.network.max_concurrency == 0 || args.common.network.per_host == 0 {
-        eprintln!("error: --max-concurrency and --per-host must be at least 1");
-        return ExitCode::from(USAGE);
-    }
-    // Validate argument values (usage errors) before any path or environment
-    // check, so a bad regex reports exit 2 regardless of whether a path exists.
-    let exclude_urls = match args
-        .common
-        .exclude_url
-        .iter()
-        .map(|value| Regex::new(value))
-        .collect::<Result<Vec<_>, _>>()
-    {
-        Ok(regexes) => regexes,
-        Err(error) => {
-            eprintln!("error: invalid --exclude-url regex: {error}");
-            return ExitCode::from(USAGE);
-        }
-    };
-    if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
-        eprintln!("error: not implemented yet");
-        return ExitCode::from(ENVIRONMENT);
-    }
     let mut paths = args.common.paths;
     if args.common.stdin {
         let mut input = String::new();
@@ -320,6 +315,81 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
                 .map(PathBuf::from),
         );
     }
+    // A scan uses the nearest config above its first input path; stdin paths are
+    // appended after positional paths, so stdin-only scans use their first line.
+    let first_path = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    let network = &args.common.network;
+    let mut settings = match config::resolve(&first_path) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
+    if let Some(value) = network.max_concurrency {
+        settings.network.max_concurrency = value;
+    }
+    if let Some(value) = network.per_host {
+        settings.network.per_host = value;
+    }
+    if let Some(value) = network.timeout {
+        settings.network.timeout = std::time::Duration::from_secs(value);
+    }
+    if let Some(value) = network.retries {
+        settings.network.retries = value;
+    }
+    if let Some(value) = &network.user_agent {
+        settings.network.user_agent = Some(value.clone());
+    }
+    if let Some(value) = &network.cache_ttl {
+        settings.cache.ttl = match humantime::parse_duration(value) {
+            Ok(ttl) => ttl,
+            Err(error) => {
+                eprintln!("error: invalid --cache-ttl: {error}");
+                return ExitCode::from(USAGE);
+            }
+        };
+    }
+    if args.common.no_local {
+        settings.ignore.local_links = true;
+    }
+    let fail_on = match args.common.output.fail_on {
+        Some(value) => value,
+        None => match settings.output.fail_on.parse::<ConfidenceLevel>() {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!(
+                    "error: invalid output.fail-on value: {}",
+                    settings.output.fail_on
+                );
+                return ExitCode::from(USAGE);
+            }
+        },
+    };
+    if settings.network.max_concurrency == 0 || settings.network.per_host == 0 {
+        eprintln!("error: --max-concurrency and --per-host must be at least 1");
+        return ExitCode::from(USAGE);
+    }
+    // Validate argument values (usage errors) before any path or environment
+    // check, so a bad regex reports exit 2 regardless of whether a path exists.
+    let exclude_urls = match args
+        .common
+        .exclude_url
+        .iter()
+        .chain(settings.ignore.exclude_url.iter())
+        .map(|value| Regex::new(value))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(regexes) => regexes,
+        Err(error) => {
+            eprintln!("error: invalid --exclude-url regex: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
+    if args.common.output.json || !matches!(args.common.output.format, OutputFormat::Table) {
+        eprintln!("error: not implemented yet");
+        return ExitCode::from(ENVIRONMENT);
+    }
     for path in &paths {
         if !path.exists() {
             eprintln!("error: path does not exist: {}", path.display());
@@ -327,10 +397,10 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         }
     }
     let checker = match HttpChecker::new(
-        Duration::from_secs(args.common.network.timeout),
-        args.common.network.retries,
-        args.common.network.per_host as usize,
-        args.common
+        settings.network.timeout,
+        settings.network.retries,
+        settings.network.per_host as usize,
+        settings
             .network
             .user_agent
             .unwrap_or_else(|| format!("stalelink/{}", env!("CARGO_PKG_VERSION"))),
@@ -341,21 +411,28 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
             return ExitCode::from(ENVIRONMENT);
         }
     };
+    let cache_path = cache_path(settings.cache.dir.as_deref());
     let input = ScanInput {
         paths,
         walk: WalkOptions {
             include: args.common.include,
-            exclude: args.common.exclude,
+            exclude: args
+                .common
+                .exclude
+                .into_iter()
+                .chain(settings.ignore.exclude)
+                .collect(),
         },
-        max_concurrency: args.common.network.max_concurrency as usize,
+        max_concurrency: settings.network.max_concurrency as usize,
         exclude_urls,
         exclude_domains: args
             .common
             .exclude_domain
             .into_iter()
+            .chain(settings.ignore.exclude_domain)
             .map(|domain| domain.to_ascii_lowercase())
             .collect(),
-        check_local: !args.common.no_local,
+        check_local: !settings.ignore.local_links,
     };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -365,10 +442,32 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         }
     };
     let show_progress = !quiet && io::stderr().is_terminal();
-    let result = if show_progress {
-        runtime.block_on(scan(input, &checker, &StderrProgress))
+    let result = if network.no_cache {
+        if show_progress {
+            runtime.block_on(scan(input, &checker, &StderrProgress))
+        } else {
+            runtime.block_on(scan(input, &checker, &NoProgress))
+        }
     } else {
-        runtime.block_on(scan(input, &checker, &NoProgress))
+        let cache = match cache::VerdictCache::open(cache_path) {
+            Ok(cache) => cache,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::from(ENVIRONMENT);
+            }
+        };
+        let checker =
+            cache::CachingChecker::new(checker, cache, settings.cache.ttl, 1, network.refresh);
+        let result = if show_progress {
+            runtime.block_on(scan(input, &checker, &StderrProgress))
+        } else {
+            runtime.block_on(scan(input, &checker, &NoProgress))
+        };
+        if let Some(error) = checker.error() {
+            eprintln!("error: {error}");
+            return ExitCode::from(ENVIRONMENT);
+        }
+        result
     };
     if show_progress {
         eprintln!();
@@ -383,7 +482,7 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     let failed = report
         .findings
         .iter()
-        .any(|finding| finding.verdict.confidence >= Confidence::from(args.common.output.fail_on));
+        .any(|finding| finding.verdict.confidence >= Confidence::from(fail_on));
     let minimum = Confidence::from(args.common.output.min_confidence);
     report
         .findings
@@ -398,6 +497,54 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         return ExitCode::from(ENVIRONMENT);
     }
     ExitCode::from(if failed { 1 } else { CLEAN })
+}
+
+fn cache_path(configured: Option<&std::path::Path>) -> PathBuf {
+    if let Some(directory) = configured {
+        return directory.join("verdicts.sqlite3");
+    }
+    if let Some(directory) = std::env::var_os("STALELINK_CACHE_DIR") {
+        return PathBuf::from(directory).join("verdicts.sqlite3");
+    }
+    directories::ProjectDirs::from("com", "stalelink", "stalelink")
+        .map(|directories| directories.cache_dir().join("verdicts.sqlite3"))
+        .unwrap_or_else(|| PathBuf::from(".stalelink-cache.sqlite3"))
+}
+
+fn run_cache(command: CacheCommand) -> ExitCode {
+    // Cache commands are project-scoped from the current working directory.
+    let settings = match config::resolve(std::path::Path::new(".")) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::from(USAGE);
+        }
+    };
+    let path = cache_path(settings.cache.dir.as_deref());
+    match command {
+        CacheCommand::Clear => match cache::VerdictCache::clear(&path) {
+            Ok(()) => ExitCode::from(CLEAN),
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::from(ENVIRONMENT)
+            }
+        },
+        CacheCommand::Stats => {
+            match cache::VerdictCache::open(path).and_then(|cache| cache.stats()) {
+                Ok(stats) => {
+                    println!(
+                        "hits: {}\nmisses: {}\nentries: {}\nsize: {}",
+                        stats.hits, stats.misses, stats.entries, stats.size
+                    );
+                    ExitCode::from(CLEAN)
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(ENVIRONMENT)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

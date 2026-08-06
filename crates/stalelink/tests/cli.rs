@@ -1,10 +1,10 @@
-use assert_cmd::Command;
 use predicates::prelude::*;
+
+mod util;
 
 #[test]
 fn help_lists_commands_and_examples() {
-    let output = Command::cargo_bin("stalelink")
-        .unwrap()
+    let output = util::command()
         .arg("--help")
         .assert()
         .success()
@@ -21,8 +21,7 @@ fn help_lists_commands_and_examples() {
 
 #[test]
 fn json_conflicts_with_format() {
-    Command::cargo_bin("stalelink")
-        .unwrap()
+    util::command()
         .args(["scan", "--json", "--format", "sarif", "x.md"])
         .assert()
         .code(2)
@@ -31,8 +30,7 @@ fn json_conflicts_with_format() {
 
 #[test]
 fn scan_requires_paths_or_stdin() {
-    Command::cargo_bin("stalelink")
-        .unwrap()
+    util::command()
         .arg("scan")
         .assert()
         .code(2)
@@ -41,8 +39,7 @@ fn scan_requires_paths_or_stdin() {
 
 #[test]
 fn bash_completions_are_generated() {
-    Command::cargo_bin("stalelink")
-        .unwrap()
+    util::command()
         .args(["completions", "bash"])
         .assert()
         .success()
@@ -51,8 +48,7 @@ fn bash_completions_are_generated() {
 
 #[test]
 fn backup_requires_write() {
-    Command::cargo_bin("stalelink")
-        .unwrap()
+    util::command()
         .args(["fix", "--backup", "x.md"])
         .assert()
         .code(2)
@@ -61,8 +57,7 @@ fn backup_requires_write() {
 
 #[test]
 fn backup_conflicts_with_copy() {
-    Command::cargo_bin("stalelink")
-        .unwrap()
+    util::command()
         .args(["fix", "--backup", "--copy", "x.md"])
         .assert()
         .code(2)
@@ -72,10 +67,83 @@ fn backup_conflicts_with_copy() {
 #[test]
 fn clean_scan_exits_zero_with_no_stdout() {
     let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
-    Command::cargo_bin("stalelink")
-        .unwrap()
-        .args(["scan", file.path().to_str().unwrap()])
+    let mut command = util::command();
+    command
+        .args(["scan", "--no-cache", file.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout("");
+}
+
+#[test]
+fn unknown_toml_key_is_a_usage_error_with_suggestion() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[network]\ntimout = \"1s\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("note.txt"), "").unwrap();
+    let mut command = util::command();
+    command
+        .args(["scan", "--no-cache", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("did you mean `network.timeout`"));
+}
+
+#[test]
+fn invalid_auth_config_is_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[auth]\nauth = \"cookes\"\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("note.txt"), "").unwrap();
+    let mut command = util::command();
+    command
+        .args(["scan", "--no-cache", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid auth.auth"));
+}
+
+#[test]
+fn invalid_auth_environment_is_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "").unwrap();
+    let mut command = util::command();
+    command
+        .env("STALELINK_AUTH_BROWSER", "safari")
+        .args(["scan", "--no-cache", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid auth.browser"));
+}
+
+#[test]
+fn cache_commands_use_toml_directory_from_current_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("configured-cache");
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        format!("[cache]\ndir = '''{}'''\n", cache.display()),
+    )
+    .unwrap();
+    let mut stats = util::command();
+    stats
+        .current_dir(directory.path())
+        .args(["cache", "stats"])
+        .assert()
+        .success();
+    let database = cache.join("verdicts.sqlite3");
+    assert!(database.exists());
+    let mut clear = util::command();
+    clear
+        .current_dir(directory.path())
+        .args(["cache", "clear"])
+        .assert()
+        .success();
+    assert!(!database.exists());
 }
