@@ -19,7 +19,12 @@ fn main() {
     let mut args = env::args().skip(1);
     match (args.next().as_deref(), args.next()) {
         (Some("generate"), Some(directory)) => generate(Path::new(&directory)),
-        (Some("extract"), Some(directory)) => extract_directory(Path::new(&directory), 0, 1, None),
+        (Some("generate-validation"), Some(directory)) => {
+            generate_validation(Path::new(&directory))
+        }
+        (Some("extract"), Some(directory)) => {
+            extract_directory(Path::new(&directory), 0, 1, args.next().as_deref())
+        }
         (Some("throughput"), Some(directory)) => {
             let warmup = args.next().unwrap_or_else(|| "1".into()).parse().unwrap();
             let passes = args.next().unwrap_or_else(|| "5".into()).parse().unwrap();
@@ -53,7 +58,7 @@ fn generate(directory: &Path) {
                 match copy % 3 {
                     0 => format!("<a href=\"{url}\">Tom &amp; Ada</a>\n"),
                     1 => format!("<link href='{url}' rel=\"alternate\">\n"),
-                    _ => format!("<img src={url} alt=\"diagram\">\n"),
+                    _ => format!("<img src=\"{url}\" alt=\"diagram\">\n"),
                 }
             });
             write_text(directory, "txt", &name, links, &mut seed, |url| {
@@ -65,6 +70,106 @@ fn generate(directory: &Path) {
             write_pdf(directory, &name, links, &mut seed, copy % 2 == 0);
         }
     }
+}
+
+fn generate_validation(directory: &Path) {
+    let _ = fs::remove_dir_all(directory);
+    fs::create_dir_all(directory).unwrap();
+    fs::write(directory.join("spans.md"), "[one](https://repeat.test/a) [two](https://repeat.test/a)\n[escaped](https://escape.test/a\\(b\\))\n[ref]: https://reference.test/a\\(b\\)\n[use][ref]\n").unwrap();
+    fs::write(directory.join("spans.html"), "https://repeat.test/a <a href=\"https://repeat.test/a\">one</a><a href='https://repeat.test/a'>two</a><a href=\"https://entity.test/a?x=1&amp;y=2\">entity</a>").unwrap();
+    write_validation_docx(directory);
+    write_validation_xlsx(directory);
+    write_validation_pptx(directory);
+    write_validation_pdf(directory);
+}
+
+fn validation_zip(directory: &Path, name: &str, entries: Vec<(&str, String)>) {
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (path, contents) in entries {
+        zip.start_file(path, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(contents.as_bytes()).unwrap();
+    }
+    fs::write(directory.join(name), zip.finish().unwrap().into_inner()).unwrap();
+}
+
+fn write_validation_docx(directory: &Path) {
+    validation_zip(directory, "fields.docx", vec![
+        ("word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:fldSimple w:instr=\"HYPERLINK &quot;https://simple.test/a&quot;\"/></w:p><w:p><w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText> HYPERLINK &quot;https://split.test/</w:instrText></w:r><w:r><w:instrText>a&quot; </w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r></w:p></w:body></w:document>".into()),
+    ]);
+}
+
+fn write_validation_xlsx(directory: &Path) {
+    validation_zip(directory, "sheets.xlsx", vec![
+        ("xl/workbook.xml", "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Zulu\" sheetId=\"1\" r:id=\"rId2\"/><sheet name=\"Alpha\" sheetId=\"2\" r:id=\"rId1\"/></sheets></workbook>".into()),
+        ("xl/_rels/workbook.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Target=\"worksheets/sheet2.xml\"/><Relationship Id=\"rId2\" Target=\"worksheets/sheet1.xml\"/></Relationships>".into()),
+        ("xl/worksheets/sheet1.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row><c r=\"B2\"><f>HYPERLINK(&quot;https://zulu.test/a&quot;)</f></c></row></sheetData></worksheet>".into()),
+        ("xl/worksheets/sheet2.xml", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row><c r=\"A1\"><f>HYPERLINK(&quot;https://alpha.test/a&quot;)</f></c></row></sheetData></worksheet>".into()),
+    ]);
+}
+
+fn write_validation_pptx(directory: &Path) {
+    validation_zip(directory, "slides.pptx", vec![
+        ("ppt/presentation.xml", "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst><p:sldId id=\"1\" r:id=\"rId2\"/><p:sldId id=\"2\" r:id=\"rId1\"/></p:sldIdLst></p:presentation>".into()),
+        ("ppt/_rels/presentation.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Target=\"slides/slide2.xml\"/><Relationship Id=\"rId2\" Target=\"slides/slide1.xml\"/></Relationships>".into()),
+        ("ppt/slides/slide1.xml", "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><a:hlinkClick r:id=\"rId1\"/></p:sld>".into()),
+        ("ppt/slides/_rels/slide1.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Target=\"https://first.test/a\" TargetMode=\"External\"/></Relationships>".into()),
+        ("ppt/slides/slide2.xml", "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><a:hlinkClick r:id=\"rId1\"/></p:sld>".into()),
+        ("ppt/slides/_rels/slide2.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Target=\"https://second.test/a\" TargetMode=\"External\"/></Relationships>".into()),
+    ]);
+}
+
+fn write_validation_pdf(directory: &Path) {
+    let stream = b"BT /F1 12 Tf 72 720 Td (https://page.two.test/a) Tj ET\n";
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(stream).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Annots 5 0 R >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 8 0 R >> >> /Contents 6 0 R >>".into(),
+        "[7 0 R]".into(),
+        format!("<< /Length {} /Filter /FlateDecode >>", compressed.len()),
+        "<< /Type /Annot /Subtype /Link /Rect [0 0 1 1] /A 9 0 R >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /S /URI /URI (https://annotation.page.one.test/a) >>".into(),
+    ];
+    fs::write(
+        directory.join("pages.pdf"),
+        pdf_with_stream(&objects, 6, &compressed),
+    )
+    .unwrap();
+}
+
+fn pdf_with_stream(objects: &[String], stream_object: usize, stream: &[u8]) -> Vec<u8> {
+    let mut output = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0];
+    for (number, object) in objects.iter().enumerate() {
+        offsets.push(output.len());
+        output.extend_from_slice(format!("{} 0 obj\n{object}", number + 1).as_bytes());
+        if number + 1 == stream_object {
+            output.extend_from_slice(b"\nstream\n");
+            output.extend_from_slice(stream);
+            output.extend_from_slice(b"\nendstream");
+        }
+        output.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = output.len();
+    output.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets.iter().skip(1) {
+        output.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    output.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    output
 }
 
 fn next_url(seed: &mut u64) -> String {
@@ -286,14 +391,30 @@ fn extract_directory(directory: &Path, warmup: usize, passes: usize, format_filt
     println!(
         "{}",
         serde_json::json!({
-            "documents": if format_filter.is_some() { links.iter().map(|link| &link.source.path).collect::<std::collections::HashSet<_>>().len() } else { fs::read_dir(directory).unwrap().count() },
+            "documents": document_count(directory, format_filter),
             "links": links.len(),
             "digest": format!("{:016x}", hasher.finish()),
             "records": records,
-            "median_seconds": elapsed[elapsed.len() / 2],
+            "median_seconds": if elapsed.len().is_multiple_of(2) { (elapsed[elapsed.len() / 2 - 1] + elapsed[elapsed.len() / 2]) / 2.0 } else { elapsed[elapsed.len() / 2] },
             "formats": formats,
         })
     );
+}
+
+fn document_count(directory: &Path, format_filter: Option<&str>) -> usize {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| {
+            format_filter.is_none_or(|format| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == format)
+            })
+        })
+        .count()
 }
 
 fn format_of(extension: &str) -> Option<DocFormat> {

@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $corpus = Join-Path $root 'bench/corpus'
+$validation = Join-Path $root 'bench/validation'
 $results = Join-Path $root 'bench/results'
 New-Item -ItemType Directory -Force $results | Out-Null
 Add-Type @'
@@ -66,7 +67,7 @@ function Invoke-Harness($name, $program, [string[]]$arguments) {
     $native.Refresh()
     $peak = [PeakWorkingSet]::Read($native.Handle)
   }
-  if ($peak -le 0) { throw "$name did not expose PeakWorkingSet64 after exit; refusing to label a sampled value as peak" }
+  if ($peak -le 0) { throw "$name did not expose PeakWorkingSetSize after exit; refusing to label a sampled value as peak" }
   [pscustomobject]@{ Receipt=$receipt; ElapsedMs=$watch.Elapsed.TotalMilliseconds; PeakWorkingSetBytes=$peak }
 }
 
@@ -79,9 +80,19 @@ function Assert-Equivalent($rust, $go, $context) {
   $rustDigest
 }
 
+function Get-ExpectedDocumentCount([string]$directory, [string]$format = '') {
+  @(Get-ChildItem -LiteralPath $directory -File | Where-Object { $format -eq '' -or $_.Extension -eq ".$format" }).Count
+}
+
+function Assert-DocumentCount($run, [int]$expected, $context) {
+  if ($run.Receipt.documents -ne $expected) { throw "$context counted $($run.Receipt.documents) documents; expected $expected matching input files" }
+}
+
 Push-Location $root
 try {
   cargo run --quiet --release --manifest-path bench/rust-harness/Cargo.toml -- generate $corpus
+
+  cargo run --quiet --release --manifest-path bench/rust-harness/Cargo.toml -- generate-validation $validation
   cargo fmt --manifest-path bench/rust-harness/Cargo.toml -- --check
   cargo clippy --manifest-path bench/rust-harness/Cargo.toml --all-targets -- -D warnings
   cargo build --quiet --release --manifest-path bench/rust-harness/Cargo.toml
@@ -89,9 +100,17 @@ try {
   $rust = Join-Path $root 'bench/rust-harness/target/release/stalelink-bench-harness.exe'
   $go = Join-Path $root 'bench/go-port/stalelink-go.exe'
 
+  $validationRust = Invoke-Harness Rust $rust @('extract', $validation)
+  $validationGo = Invoke-Harness Go $go @('extract', $validation)
+  Assert-DocumentCount $validationRust (Get-ExpectedDocumentCount $validation) 'validation Rust extraction'
+  Assert-DocumentCount $validationGo (Get-ExpectedDocumentCount $validation) 'validation Go extraction'
+  Assert-Equivalent $validationRust $validationGo 'validation extraction' | Out-Null
+
   $baselineRust = Invoke-Harness Rust $rust @('extract', $corpus)
   $baselineGo = Invoke-Harness Go $go @('extract', $corpus)
   $digest = Assert-Equivalent $baselineRust $baselineGo 'baseline extraction'
+  Assert-DocumentCount $baselineRust (Get-ExpectedDocumentCount $corpus) 'baseline Rust extraction'
+  Assert-DocumentCount $baselineGo (Get-ExpectedDocumentCount $corpus) 'baseline Go extraction'
   $documents = $baselineRust.Receipt.documents
   $links = $baselineRust.Receipt.links
 
@@ -125,8 +144,15 @@ try {
     }
     foreach ($format in @('md', 'html', 'txt', 'docx', 'xlsx', 'pptx', 'pdf')) {
       $samples = @()
+      $baselineFormatRust = Invoke-Harness Rust $rust @('extract', $corpus, $format)
+      $baselineFormatGo = Invoke-Harness Go $go @('extract', $corpus, $format)
+      $expectedFormatDocuments = Get-ExpectedDocumentCount $corpus $format
+      Assert-DocumentCount $baselineFormatRust $expectedFormatDocuments "per-format $format Rust baseline"
+      Assert-DocumentCount $baselineFormatGo $expectedFormatDocuments "per-format $format Go baseline"
+      Assert-Equivalent $baselineFormatRust $baselineFormatGo "per-format $format baseline" | Out-Null
       for ($iteration = 0; $iteration -lt $Iterations; $iteration++) {
         $run = Invoke-Harness $name $program @('throughput', $corpus, $WarmupPasses, $TimedPasses, $format)
+        Assert-DocumentCount $run $expectedFormatDocuments "per-format $format throughput iteration $iteration $name"
         $samples += ($run.Receipt.documents / [double]$run.Receipt.median_seconds)
       }
       $ordered = $samples | Sort-Object

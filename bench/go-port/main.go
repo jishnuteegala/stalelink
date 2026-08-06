@@ -69,7 +69,9 @@ func main() {
 		fmt.Sscanf(os.Args[4], "%d", &passes)
 	}
 	filter := ""
-	if len(os.Args) > 5 {
+	if os.Args[1] == "extract" && len(os.Args) > 3 {
+		filter = os.Args[3]
+	} else if len(os.Args) > 5 {
 		filter = os.Args[5]
 	}
 	for range warmup {
@@ -89,18 +91,21 @@ func main() {
 	}
 	encoded, _ := json.Marshal(records)
 	sum := sha256.Sum256(encoded)
-	documents := len(records)
-	if filter == "" {
-		entries, _ := os.ReadDir(os.Args[2])
-		documents = len(entries)
-	} else {
-		seen := map[string]bool{}
-		for _, r := range records {
-			seen[r.Doc] = true
-		}
-		documents = len(seen)
-	}
+	documents := documentCount(os.Args[2], filter)
 	json.NewEncoder(os.Stdout).Encode(receipt{documents, len(records), fmt.Sprintf("%x", sum), records, median(times), formats})
+}
+func documentCount(dir, filter string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		panic(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && (filter == "" || filepath.Ext(entry.Name()) == "."+filter) {
+			count++
+		}
+	}
+	return count
 }
 
 func median(values []float64) float64 {
@@ -163,6 +168,12 @@ func addText(doc string, data []byte, raw string, start int, out *[]record) {
 		*out = append(*out, record{doc, raw, textLocation(data, start), &span})
 	}
 }
+func addTextSpan(doc string, data []byte, value string, start, end int, out *[]record) {
+	if valid(value) {
+		span := [2]int{start, end}
+		*out = append(*out, record{doc, value, textLocation(data, start), &span})
+	}
+}
 func extract(doc string, data []byte) []record {
 	switch filepath.Ext(doc) {
 	case ".html":
@@ -205,13 +216,15 @@ func bareLinks(doc string, data []byte) []record {
 func htmlLinks(doc string, data []byte) []record {
 	z := html.NewTokenizer(bytes.NewReader(data))
 	var out []record
-	cursor := 0
+	offset := 0
 	for {
 		tt := z.Next()
+		raw := append([]byte(nil), z.Raw()...)
 		if tt == html.ErrorToken {
 			break
 		}
 		if tt != html.StartTagToken && tt != html.SelfClosingTagToken {
+			offset += len(raw)
 			continue
 		}
 		token := z.Token()
@@ -224,24 +237,76 @@ func htmlLinks(doc string, data []byte) []record {
 		}
 		for _, a := range token.Attr {
 			if a.Key == attr && valid(a.Val) {
-				at := bytes.Index(data[cursor:], []byte(a.Val))
-				if at >= 0 {
-					at += cursor
-					cursor = at + len(a.Val)
-					addText(doc, data, a.Val, at, &out)
+				if start, end, ok := htmlAttributeSpan(raw, attr); ok {
+					addTextSpan(doc, data, a.Val, offset+start, offset+end, &out)
 				}
 			}
 		}
+		offset += len(raw)
 	}
 	return out
 }
 
-// Goldmark supplies Markdown grammar and semantic destinations. Source ranges are then
-// located inside the parsed node range only, preserving raw byte spans for parity checks.
+// Raw returns the exact bytes for this token, so attribute scanning is confined
+// to one tag and cannot confuse repeated or entity-decoded values elsewhere.
+func htmlAttributeSpan(raw []byte, want string) (int, int, bool) {
+	for i := 0; i < len(raw); {
+		for i < len(raw) && (raw[i] == '<' || raw[i] == '>' || raw[i] == '/' || raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
+			i++
+		}
+		nameStart := i
+		for i < len(raw) && !strings.ContainsRune("= />\t\r\n", rune(raw[i])) {
+			i++
+		}
+		name := string(raw[nameStart:i])
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
+			i++
+		}
+		if i >= len(raw) || raw[i] != '=' {
+			continue
+		}
+		i++
+		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t' || raw[i] == '\r' || raw[i] == '\n') {
+			i++
+		}
+		start := i
+		if i < len(raw) && (raw[i] == '\'' || raw[i] == '"') {
+			quote := raw[i]
+			start++
+			i++
+			for i < len(raw) && raw[i] != quote {
+				i++
+			}
+			end := i
+			if i < len(raw) {
+				i++
+			}
+			if strings.EqualFold(name, want) {
+				return start, end, true
+			}
+			continue
+		}
+		for i < len(raw) && !strings.ContainsRune(" />\t\r\n", rune(raw[i])) {
+			i++
+		}
+		if strings.EqualFold(name, want) {
+			return start, i, true
+		}
+	}
+	return 0, 0, false
+}
+
+// Goldmark supplies grammar, decoded destinations, node positions, and block segments.
+// Raw destination spans are reconstructed only inside those parser-owned ranges.
 func markdownLinks(doc string, data []byte) []record {
 	source := text.NewReader(data)
 	root := goldmark.DefaultParser().Parse(source)
 	var out []record
+	definitions := markdownDefinitions(data)
+	autolinkCursor := map[ast.Node]int{}
+	for _, definition := range definitions {
+		addTextSpan(doc, data, string(data[definition.span[0]:definition.span[1]]), definition.span[0], definition.span[1], &out)
+	}
 	ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
@@ -249,30 +314,192 @@ func markdownLinks(doc string, data []byte) []record {
 		var raw string
 		switch n := node.(type) {
 		case *ast.Link:
-			raw = html.UnescapeString(string(n.Destination))
+			raw = markdownValue(string(n.Destination))
 		case *ast.Image:
-			raw = html.UnescapeString(string(n.Destination))
+			raw = markdownValue(string(n.Destination))
 		case *ast.AutoLink:
 			raw = string(n.URL(data))
+			parent := node.Parent()
+			start, end := parent.Pos(), segmentEnd(parent)
+			if next, ok := autolinkCursor[parent]; ok {
+				start = next
+			}
+			if start >= 0 && end >= start && end <= len(data) {
+				if offset := bytes.Index(data[start:end], []byte(raw)); offset >= 0 {
+					at := start + offset
+					autolinkCursor[parent] = at + len(raw)
+					addText(doc, data, raw, at, &out)
+				}
+			}
+			return ast.WalkContinue, nil
 		case *ast.LinkReferenceDefinition:
-			raw = string(n.Destination)
+			return ast.WalkContinue, nil
 		}
 		if raw == "" || !valid(raw) {
 			return ast.WalkContinue, nil
 		}
-		segments := node.Text(data)
-		at := bytes.Index(data, []byte(raw))
-		if len(segments) > 0 {
-			if candidate := bytes.Index(data, []byte(raw)); candidate >= 0 {
-				at = candidate
+		if link, ok := node.(*ast.Link); ok && link.Reference != nil {
+			label := string(link.Reference.Value)
+			if link.Reference.Type != ast.ReferenceLinkFull {
+				label = string(link.Text(data))
 			}
+			if definition, ok := definitions[strings.ToLower(label)]; ok {
+				addTextSpan(doc, data, raw, definition.span[0], definition.span[1], &out)
+			}
+			return ast.WalkContinue, nil
 		}
-		if at >= 0 {
-			addText(doc, data, raw, at, &out)
+		if start, end, ok := markdownDestination(data, node.Pos(), segmentEnd(node)); ok {
+			addTextSpan(doc, data, raw, start, end, &out)
 		}
 		return ast.WalkContinue, nil
 	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Span[0] < out[j].Span[0] })
+	for i := 1; i < len(out); i++ {
+		if out[i].Span != nil && out[i-1].Span != nil && *out[i].Span == *out[i-1].Span {
+			out = append(out[:i], out[i+1:]...)
+			i--
+		}
+	}
 	return out
+}
+
+type markdownDefinition struct{ span [2]int }
+
+func markdownDefinitions(data []byte) map[string]markdownDefinition {
+	definitions := map[string]markdownDefinition{}
+	for lineStart := 0; lineStart < len(data); {
+		lineEnd := bytes.IndexByte(data[lineStart:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(data)
+		} else {
+			lineEnd += lineStart
+		}
+		line := data[lineStart:lineEnd]
+		if len(line) > 3 && line[0] == '[' {
+			if close := bytes.IndexByte(line, ']'); close > 0 {
+				i := close + 1
+				for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+					i++
+				}
+				if i < len(line) && line[i] == ':' {
+					if start, end, ok := markdownDestination(data, lineStart, lineEnd); ok {
+						definitions[strings.ToLower(string(line[1:close]))] = markdownDefinition{[2]int{start, end}}
+					}
+				}
+			}
+		}
+		lineStart = lineEnd + 1
+	}
+	return definitions
+}
+
+func markdownValue(raw string) string {
+	var value strings.Builder
+	escaped := false
+	for _, r := range html.UnescapeString(raw) {
+		if escaped {
+			value.WriteRune(r)
+			escaped = false
+		} else if r == '\\' {
+			escaped = true
+		} else {
+			value.WriteRune(r)
+		}
+	}
+	if escaped {
+		value.WriteByte('\\')
+	}
+	return value.String()
+}
+
+func segmentEnd(node ast.Node) int {
+	for n := node; n != nil; n = n.Parent() {
+		if n.Type() != ast.TypeBlock {
+			continue
+		}
+		if lines := n.Lines(); lines != nil && lines.Len() > 0 {
+			return lines.At(lines.Len() - 1).Stop
+		}
+	}
+	return -1
+}
+func markdownDestination(data []byte, start, end int) (int, int, bool) {
+	if start < 0 || end < start || end > len(data) {
+		return 0, 0, false
+	}
+	close := -1
+	depth := 0
+	escaped := false
+	for i := start; i < end; i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if data[i] == '\\' {
+			escaped = true
+			continue
+		}
+		if data[i] == '[' {
+			depth++
+		}
+		if data[i] == ']' {
+			depth--
+			if depth == 0 {
+				close = i
+				break
+			}
+		}
+	}
+	if close < 0 {
+		return 0, 0, false
+	}
+	i := close + 1
+	if i >= end || data[i] != '(' { // reference definition: [label]: destination
+		for i < end && (data[i] == ' ' || data[i] == '\t') {
+			i++
+		}
+		if i >= end || data[i] != ':' {
+			return 0, 0, false
+		}
+		i++
+		for i < end && (data[i] == ' ' || data[i] == '\t') {
+			i++
+		}
+	} else {
+		i++
+	}
+	if i < end && data[i] == '<' {
+		i++
+		value := i
+		for i < end && data[i] != '>' {
+			i++
+		}
+		return value, i, i < end
+	}
+	value, depth, escaped := i, 0, false
+	for i < end {
+		if escaped {
+			escaped = false
+			i++
+			continue
+		}
+		if data[i] == '\\' {
+			escaped = true
+			i++
+			continue
+		}
+		if data[i] == '(' {
+			depth++
+		}
+		if (data[i] == ')' && depth == 0) || (data[i] == ' ' || data[i] == '\t' || data[i] == '\n') {
+			break
+		}
+		if data[i] == ')' {
+			depth--
+		}
+		i++
+	}
+	return value, i, i > value
 }
 
 func zipFiles(data []byte) map[string][]byte {

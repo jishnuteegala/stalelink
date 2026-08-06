@@ -4,4 +4,5 @@
 /bench/go-port/stalelink-benchmark-go-port.exe
 /bench/results/
 /bench/corpus/
+/bench/validation/
 /bench/rust-harness/target/
