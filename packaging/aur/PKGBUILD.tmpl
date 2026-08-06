@@ -1,0 +1,15 @@
+# Activated after the first public GitHub release.
+pkgname=stalelink-bin
+pkgver={{ version }}
+pkgrel=1
+pkgdesc='Find dead and outdated links in local documents'
+arch=('x86_64' 'aarch64')
+url='https://github.com/jishnuteegala/stalelink'
+license=('MIT')
+source_x86_64=('{{ linux_x64_url }}')
+source_aarch64=('{{ linux_arm64_url }}')
+sha256sums_x86_64=('{{ linux_x64_sha256 }}')
+sha256sums_aarch64=('{{ linux_arm64_sha256 }}')
+package() {
+  install -Dm755 stalelink "$pkgdir/usr/bin/stalelink"
+}

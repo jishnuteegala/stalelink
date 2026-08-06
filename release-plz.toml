@@ -1,0 +1,10 @@
+[workspace]
+changelog_config = "cliff.toml"
+publish = false
+
+[[package]]
+name = "stalelink"
+changelog_update = true
+git_tag_enable = true
+git_release_enable = true
+publish = true

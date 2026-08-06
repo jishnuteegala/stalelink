@@ -1,16 +1,19 @@
 # stalelink
 
-> CLI that scans local documents (PDF, DOCX, XLSX, PPTX, Markdown, HTML, plain text) for dead and outdated hyperlinks. Uses the user's own browser authenticated state (profile cookies, or a real browser via CDP) so login-walled links are never falsely reported dead. Fully local: no telemetry, no data stored or tracked.
+stalelink is a local Rust CLI for scanning PDF, DOCX, XLSX, PPTX, Markdown, HTML, and text documents for dead, redirected, stale, authenticated, malformed, and broken local links. It can produce table, JSON, and SARIF reports, caches HTTP verdicts locally, and previews or applies safe link fixes.
 
-Status: pre-release, under active development. First tagged release ships the complete local feature set.
+Repository: https://github.com/jishnuteegala/stalelink
+License: MIT
 
-## Usage (planned surface)
+## Commands
 
-- `stalelink check <paths...>` - scan files/directories for dead, redirected, auth-walled, and outdated links; exit codes distinguish clean runs from findings.
-- `stalelink fix <paths...>` - preview link rewrites as a diff; `--write` applies in place; `--backup` / `--copy` for cautious modes.
-- Output formats: human table (default), `--json`, SARIF.
-- Config: `stalelink.toml` discovered upward from cwd; `STALELINK_*` env vars; precedence flags > env > config > defaults.
+- `stalelink scan <paths>` scans recursively. Use `--format json` or `--format sarif` for machine output.
+- `stalelink fix <paths>` previews suggested replacements. Add `--write`, `--backup`, or `--copy` to persist fixes.
+- `stalelink cache stats|clear` inspects or removes the local SQLite verdict cache.
+- `stalelink completions bash|zsh|fish|powershell` writes a shell completion script to stdout.
 
-## Docs
+## Operational contract
 
-- README.md: problem statement, install channels, license (MIT).
+Findings and fix diffs are stdout-only. Diagnostics, warnings, progress, and `-v` traces are stderr-only. Exit codes are 0 for clean/successful dry runs, 1 for report findings meeting `--fail-on` or refused/failed fixes, 2 for usage/configuration errors, and 3 for environment setup failures. Configuration precedence is flags, environment, nearest `stalelink.toml`, then defaults.
+
+No telemetry is collected. Requested link checks make network requests and their verdicts are cached locally unless `--no-cache` is used.

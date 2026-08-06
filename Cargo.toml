@@ -7,6 +7,34 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/jishnuteegala/stalelink"
+description = "Find dead and outdated links in local documents"
+keywords = ["links", "link-checker", "documents", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# Whether to consider the binaries in a package for distribution (defaults true)
+dist = true
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Whether dist should create a Github Release or use an existing draft
+create-release = true
+# Whether to enable GitHub Attestations
+github-attestations = true
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Where to host releases
+hosting = "github"
+# Whether to install an updater program
+install-updater = false
+# The release workflow intentionally adds --draft to GitHub release creation.
+allow-dirty = ["ci"]
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
@@ -42,3 +70,8 @@ tempfile = "3"
 html-escape = "0.2"
 rookie = "0.5.6"
 chromiumoxide = { version = "0.9.1", default-features = false }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

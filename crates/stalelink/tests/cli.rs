@@ -38,12 +38,29 @@ fn scan_requires_paths_or_stdin() {
 }
 
 #[test]
-fn bash_completions_are_generated() {
+fn supported_shells_generate_non_empty_completions() {
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let output = util::command()
+            .args(["completions", shell])
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let completions = String::from_utf8(output.stdout).unwrap();
+        assert!(!completions.is_empty(), "{shell} completions were empty");
+        assert!(
+            completions.contains("stalelink"),
+            "{shell} completions lack binary name"
+        );
+    }
+}
+
+#[test]
+fn invalid_completion_shell_is_a_usage_error() {
     util::command()
-        .args(["completions", "bash"])
+        .args(["completions", "nushell"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("_stalelink()"));
+        .code(2);
 }
 
 #[test]
@@ -95,6 +112,33 @@ fn clean_scan_exits_zero_with_no_stdout() {
         .assert()
         .success()
         .stdout("");
+}
+
+#[test]
+fn quiet_suppresses_verbose_traces() {
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    util::command()
+        .args([
+            "--quiet",
+            "-v",
+            "scan",
+            "--no-cache",
+            file.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn verbose_writes_traces_to_stderr_only() {
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    util::command()
+        .args(["-v", "scan", "--no-cache", file.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr(predicate::str::contains("trace: resolving configuration"));
 }
 
 #[test]

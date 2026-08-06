@@ -280,6 +280,20 @@ impl Progress for StderrProgress {
     }
 }
 
+fn use_color(requested: Color, is_terminal: bool, no_color: bool) -> bool {
+    match requested {
+        Color::Always => true,
+        Color::Never => false,
+        Color::Auto => is_terminal && !no_color,
+    }
+}
+
+fn trace(verbose: u8, quiet: bool, message: impl std::fmt::Display) {
+    if verbose > 0 && !quiet {
+        eprintln!("trace: {message}");
+    }
+}
+
 fn main() -> ExitCode {
     match Cli::try_parse() {
         Ok(cli) => run(cli),
@@ -301,14 +315,15 @@ fn run(cli: Cli) -> ExitCode {
             generate(shell, &mut command, "stalelink", &mut io::stdout());
             ExitCode::from(CLEAN)
         }
-        Command::Scan(args) => run_scan(args, cli.quiet),
+        Command::Scan(args) => run_scan(args, cli.quiet, cli.verbose),
         Command::Cache { command } => run_cache(command),
-        Command::Fix(args) => run_fix(args, cli.quiet),
+        Command::Fix(args) => run_fix(args, cli.quiet, cli.verbose, cli.color),
     }
 }
 
-fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
-    let (mut report, fail_on) = match scan_common(&args.common, Some(&args.output), quiet) {
+fn run_scan(args: ScanArgs, quiet: bool, verbose: u8) -> ExitCode {
+    let (mut report, fail_on) = match scan_common(&args.common, Some(&args.output), quiet, verbose)
+    {
         Ok(report) => report,
         Err(exit_code) => return ExitCode::from(exit_code),
     };
@@ -350,6 +365,7 @@ fn scan_common(
     args: &CommonArgs,
     output: Option<&OutputArgs>,
     quiet: bool,
+    verbose: u8,
 ) -> Result<(stalelink_core::scan::ScanReport, Confidence), u8> {
     let mut paths = args.paths.clone();
     if args.stdin {
@@ -368,6 +384,11 @@ fn scan_common(
     // A scan uses the nearest config above its first input path; stdin paths are
     // appended after positional paths, so stdin-only scans use their first line.
     let first_path = paths.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    trace(
+        verbose,
+        quiet,
+        format_args!("resolving configuration from {}", first_path.display()),
+    );
     let network = &args.network;
     let mut settings = match config::resolve(&first_path) {
         Ok(settings) => settings,
@@ -464,6 +485,11 @@ fn scan_common(
         _ => Auth::Cookies,
     };
     let selected_auth = requested_auth.unwrap_or(configured_auth);
+    trace(
+        verbose,
+        quiet,
+        format_args!("auth escalation cap: {selected_auth:?}"),
+    );
     let configured_browser = match settings.auth.browser.as_str() {
         "chrome" => Browser::Chrome,
         "edge" => Browser::Edge,
@@ -664,8 +690,8 @@ fn scan_common(
     }
 }
 
-fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
-    let report = match scan_common(&args.common, None, quiet) {
+fn run_fix(args: FixArgs, quiet: bool, verbose: u8, color: Color) -> ExitCode {
+    let report = match scan_common(&args.common, None, quiet, verbose) {
         Ok((report, _)) => report,
         Err(exit_code) => return ExitCode::from(exit_code),
     };
@@ -726,9 +752,9 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
                 format,
                 DocFormat::Pdf | DocFormat::Docx | DocFormat::Xlsx | DocFormat::Pptx
             ) {
-                print_binary_summary(&path, &findings);
+                print_binary_summary(&path, &findings, color);
             } else {
-                print_diff(&path, &original, &fixed);
+                print_diff(&path, &original, &fixed, color);
             }
             continue;
         }
@@ -792,18 +818,31 @@ fn preflight_pdfs(
     (refused_paths, refused)
 }
 
-fn print_binary_summary(path: &Path, findings: &[Finding]) {
+fn print_binary_summary(path: &Path, findings: &[Finding], color: Color) {
     for finding in findings {
         let replacement = &finding
             .fix
             .as_ref()
             .expect("selected finding has a fix")
             .replacement_url;
-        println!("{}: {} -> {}", path.display(), finding.url, replacement);
+        if use_color(
+            color,
+            io::stdout().is_terminal(),
+            std::env::var_os("NO_COLOR").is_some(),
+        ) {
+            println!(
+                "\x1b[36m{}\x1b[0m: {} -> \x1b[32m{}\x1b[0m",
+                path.display(),
+                finding.url,
+                replacement
+            );
+        } else {
+            println!("{}: {} -> {}", path.display(), finding.url, replacement);
+        }
     }
 }
 
-fn print_diff(path: &Path, original: &[u8], fixed: &[u8]) {
+fn print_diff(path: &Path, original: &[u8], fixed: &[u8], color: Color) {
     let original = String::from_utf8_lossy(original);
     let fixed = String::from_utf8_lossy(fixed);
     let diff = similar::TextDiff::from_lines(&original, &fixed)
@@ -813,7 +852,24 @@ fn print_diff(path: &Path, original: &[u8], fixed: &[u8]) {
             &format!("b/{}", path.display()),
         )
         .to_string();
-    print!("{diff}");
+    if use_color(
+        color,
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    ) {
+        for line in diff.lines() {
+            let ansi = if line.starts_with('+') && !line.starts_with("+++") {
+                "\x1b[32m"
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                "\x1b[31m"
+            } else {
+                ""
+            };
+            println!("{ansi}{line}\x1b[0m");
+        }
+    } else {
+        print!("{diff}");
+    }
 }
 
 fn fixed_copy_path(path: &Path) -> PathBuf {
@@ -1029,6 +1085,15 @@ mod tests {
         assert_eq!(tier3_unavailable(Some(Auth::Browser)), Err(ENVIRONMENT));
         assert_eq!(tier3_unavailable(Some(Auth::Cookies)), Ok(()));
         assert_eq!(tier3_unavailable(None), Ok(()));
+    }
+
+    #[test]
+    fn color_auto_requires_a_terminal_and_honors_no_color() {
+        assert!(!use_color(Color::Auto, false, false));
+        assert!(!use_color(Color::Auto, true, true));
+        assert!(use_color(Color::Auto, true, false));
+        assert!(use_color(Color::Always, false, true));
+        assert!(!use_color(Color::Never, true, false));
     }
 
     #[test]
