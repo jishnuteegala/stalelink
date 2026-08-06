@@ -193,3 +193,24 @@ async fn write_preserves_markdown_and_html_syntax_outside_url_values() {
         )
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_fixes_html_c1_numeric_character_references() {
+    let server = redirect_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("page.html");
+    fs::write(
+        &file,
+        format!(r#"<a href='{}/old?currency=&#128;'>x</a>"#, server.uri()),
+    )
+    .unwrap();
+
+    fix(&file, &["--write", "--min-fix-confidence", "outdated"])
+        .code(0)
+        .stderr("");
+
+    assert_eq!(
+        fs::read_to_string(file).unwrap(),
+        format!(r#"<a href='{}/new?x=1&amp;y=2'>x</a>"#, server.uri())
+    );
+}

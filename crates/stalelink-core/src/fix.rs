@@ -145,7 +145,77 @@ fn attribute_syntax(original: &[u8], start: usize) -> AttributeSyntax {
 }
 
 fn decode_html_attribute(raw: &[u8]) -> String {
-    html_escape::decode_html_entities(&String::from_utf8_lossy(raw)).to_string()
+    let raw = String::from_utf8_lossy(raw);
+    let mut normalized = String::with_capacity(raw.len());
+    let mut position = 0;
+    while let Some(offset) = raw[position..].find("&#") {
+        let start = position + offset;
+        normalized.push_str(&raw[position..start]);
+
+        let numeric_start = start + 2;
+        let (radix, digits_start) = match raw.as_bytes().get(numeric_start) {
+            Some(b'x' | b'X') => (16, numeric_start + 1),
+            _ => (10, numeric_start),
+        };
+        let digits_end = raw[digits_start..]
+            .find(|character: char| !character.is_digit(radix))
+            .map_or(raw.len(), |offset| digits_start + offset);
+        let numeric = &raw[digits_start..digits_end];
+        let reference_end = if raw.as_bytes().get(digits_end) == Some(&b';') {
+            digits_end + 1
+        } else {
+            digits_end
+        };
+
+        if let Ok(value) = u32::from_str_radix(numeric, radix)
+            && let Some(character) = html_c1_numeric_reference_override(value)
+        {
+            normalized.push(character);
+        } else {
+            normalized.push_str(&raw[start..reference_end]);
+        }
+        position = reference_end;
+    }
+    normalized.push_str(&raw[position..]);
+    html_escape::decode_html_entities(&normalized).to_string()
+}
+
+fn html_c1_numeric_reference_override(value: u32) -> Option<char> {
+    Some(match value {
+        0x80 => '\u{20AC}',
+        0x81 => '\u{0081}',
+        0x82 => '\u{201A}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201E}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02C6}',
+        0x89 => '\u{2030}',
+        0x8A => '\u{0160}',
+        0x8B => '\u{2039}',
+        0x8C => '\u{0152}',
+        0x8D => '\u{008D}',
+        0x8E => '\u{017D}',
+        0x8F => '\u{008F}',
+        0x90 => '\u{0090}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201C}',
+        0x94 => '\u{201D}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02DC}',
+        0x99 => '\u{2122}',
+        0x9A => '\u{0161}',
+        0x9B => '\u{203A}',
+        0x9C => '\u{0153}',
+        0x9D => '\u{009D}',
+        0x9E => '\u{017E}',
+        0x9F => '\u{0178}',
+        _ => return None,
+    })
 }
 
 fn encode_html_attribute(value: &str, syntax: AttributeSyntax) -> Vec<u8> {
@@ -424,6 +494,25 @@ mod tests {
         assert_eq!(
             String::from_utf8(fixed).unwrap(),
             "<a href=http://new.test/new>x</a>"
+        );
+    }
+
+    #[test]
+    fn html_raw_attribute_validation_decodes_c1_numeric_entities() {
+        let original = "<a href='http://old.test/old?currency=&#128;'>x</a>";
+        let finding = html_finding(
+            original,
+            "http://old.test/old?currency=&#128;",
+            "http://new.test/new",
+        );
+        let finding = Finding {
+            url: "http://old.test/old?currency=€".into(),
+            ..finding
+        };
+        let fixed = HtmlFixer.fix(original.as_bytes(), &[finding]).unwrap();
+        assert_eq!(
+            String::from_utf8(fixed).unwrap(),
+            "<a href='http://new.test/new'>x</a>"
         );
     }
 }
