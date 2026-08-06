@@ -1,1 +1,6 @@
 /target
+/bench/go-port/stalelink-go.exe
+/bench/go-port/stalelink-go
+/bench/results/
+/bench/corpus/
+/bench/rust-harness/target/

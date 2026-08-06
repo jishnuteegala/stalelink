@@ -1,0 +1,9 @@
+[package]
+name = "stalelink-bench-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+stalelink-core = { path = "../../crates/stalelink-core" }
+zip = { version = "7.2", default-features = false, features = ["deflate"] }
