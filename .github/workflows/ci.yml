@@ -59,6 +59,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
+      # PR checkouts are detached; release-plz needs a branch with an upstream.
+      - run: |
+          git checkout -B release-plz-dry-run
+          git branch --set-upstream-to "origin/${GITHUB_BASE_REF:-main}" release-plz-dry-run
       - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
         with:
           command: release
