@@ -179,11 +179,18 @@ fn artifact_uri(path: &Path) -> String {
     } else {
         // Encode through an absolute sentinel, then remove it to retain SARIF's
         // relative URI behavior. Url::set_path intentionally preserves '%' here.
+        #[cfg(windows)]
         let sentinel = Path::new(r"C:\stalelink-relative");
+        #[cfg(not(windows))]
+        let sentinel = Path::new("/stalelink-relative");
         let uri = Url::from_file_path(sentinel.join(path))
             .expect("sentinel source path must convert to a file URI");
+        #[cfg(windows)]
+        let prefix = "file:///C:/stalelink-relative/";
+        #[cfg(not(windows))]
+        let prefix = "file:///stalelink-relative/";
         uri.as_str()
-            .strip_prefix("file:///C:/stalelink-relative/")
+            .strip_prefix(prefix)
             .expect("sentinel URI has its prefix")
             .to_owned()
     }
@@ -265,7 +272,7 @@ mod tests {
                 url: "https://example.test/missing".into(),
                 resolved_url: None,
                 source: SourceRef {
-                    path: PathBuf::from(r"docs\report.pdf"),
+                    path: Path::new("docs").join("report.pdf"),
                     format: DocFormat::Pdf,
                     location: Location::Pdf {
                         page: 2,
@@ -347,7 +354,19 @@ mod tests {
     }
 
     #[test]
-    fn artifact_uris_encode_special_characters_and_round_trip_absolute_paths() {
+    fn artifact_uris_encode_special_characters() {
+        let path = Path::new("docs space")
+            .join("hash#percent%")
+            .join("unicode-ß.md");
+        assert_eq!(
+            artifact_uri(&path),
+            "docs%20space/hash%23percent%25/unicode-%C3%9F.md"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn artifact_uri_round_trips_absolute_windows_paths() {
         let path = PathBuf::from(r"C:\docs space\hash#percent%\unicode-ß.md");
         let uri = artifact_uri(&path);
         assert_eq!(
@@ -355,11 +374,18 @@ mod tests {
             "file:///C:/docs%20space/hash%23percent%25/unicode-%C3%9F.md"
         );
         assert_eq!(Url::parse(&uri).unwrap().to_file_path().unwrap(), path);
+    }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn artifact_uri_round_trips_absolute_unix_paths() {
+        let path = PathBuf::from("/docs space/hash#percent%/unicode-ß.md");
+        let uri = artifact_uri(&path);
         assert_eq!(
-            artifact_uri(Path::new(r"docs space\hash#percent%\unicode-ß.md")),
-            "docs%20space/hash%23percent%25/unicode-%C3%9F.md"
+            uri,
+            "file:///docs%20space/hash%23percent%25/unicode-%C3%9F.md"
         );
+        assert_eq!(Url::parse(&uri).unwrap().to_file_path().unwrap(), path);
     }
 
     #[test]
