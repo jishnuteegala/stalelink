@@ -383,11 +383,29 @@ func (c referenceDefinitionCollector) Transform(node *ast.Paragraph, reader text
 		if lines := definition.Lines(); lines.Len() > 0 {
 			start := definition.Pos()
 			end := lines.At(lines.Len() - 1).Stop
+			end = referenceDefinitionEnd(reader.Source(), definition, start, end)
 			if valueStart, valueEnd, ok := markdownDestination(reader.Source(), start, end); ok {
 				c.definitions[strings.ToLower(string(definition.Label))] = markdownDefinition{[2]int{valueStart, valueEnd}}
 			}
 		}
 	}
+}
+
+// Goldmark retains a parsed destination even when a reference definition's
+// segment list ends at its label line. A matching destination makes the line
+// range complete; otherwise include exactly the next physical line Goldmark
+// consumed as the destination/title continuation.
+func referenceDefinitionEnd(data []byte, definition *ast.LinkReferenceDefinition, start, end int) int {
+	if valueStart, valueEnd, ok := markdownDestination(data, start, end); ok && markdownValue(string(data[valueStart:valueEnd])) == string(definition.Destination) {
+		return end
+	}
+	if end < 0 || end >= len(data) {
+		return end
+	}
+	if newline := bytes.IndexByte(data[end:], '\n'); newline >= 0 {
+		return end + newline + 1
+	}
+	return len(data)
 }
 
 func markdownValue(raw string) string {
@@ -452,14 +470,14 @@ func markdownDestination(data []byte, start, end int) (int, int, bool) {
 	}
 	i := close + 1
 	if i >= end || data[i] != '(' { // reference definition: [label]: destination
-		for i < end && (data[i] == ' ' || data[i] == '\t') {
+		for i < end && markdownDefinitionSpace(data[i]) {
 			i++
 		}
 		if i >= end || data[i] != ':' {
 			return 0, 0, false
 		}
 		i++
-		for i < end && (data[i] == ' ' || data[i] == '\t') {
+		for i < end && markdownDefinitionSpace(data[i]) {
 			i++
 		}
 	} else {
@@ -531,6 +549,10 @@ func relationMap(data []byte, external bool) map[string]string {
 		}
 	}
 	return out
+}
+
+func markdownDefinitionSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\r' || b == '\n'
 }
 func relationshipPart(part string) string {
 	return path.Dir(part) + "/_rels/" + path.Base(part) + ".rels"

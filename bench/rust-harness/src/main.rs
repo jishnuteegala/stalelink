@@ -75,7 +75,33 @@ fn generate(directory: &Path) {
 fn generate_validation(directory: &Path) {
     let _ = fs::remove_dir_all(directory);
     fs::create_dir_all(directory).unwrap();
-    fs::write(directory.join("spans.md"), "[one](https://repeat.test/a) [two](https://repeat.test/a)\n[escaped](https://escape.test/a\\(b\\))\n\n[ref]: https://reference.test/a\\(b\\)\n\n[use][ref]\n\n  [bracket\\] label]: https://reference.test/indented \"A title\"\n\n[use][bracket\\] label]\n").unwrap();
+    fs::write(directory.join("spans.md"), "[one](https://repeat.test/a) [two](https://repeat.test/a)\n[escaped](https://escape.test/a\\(b\\))\n\n[ref]: https://reference.test/a\\(b\\)\n\n[use][ref]\n").unwrap();
+    fs::write(
+        directory.join("reference-multiline-bare.md"),
+        "[multi]:\n  https://probe.test/multi \"title\"\n\n[use][multi]\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("reference-multiline-angle.md"),
+        "[angle]:\n  <https://probe.test/angle> 'title'\n\n[use][angle]\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("reference-indent-one.md"),
+        " [one-space]: https://reference.test/one\n\n[use][one-space]\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("reference-indent-two.md"),
+        "  [two-space]: https://reference.test/two\n\n[use][two-space]\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("reference-indent-three.md"),
+        "   [three-space]: https://reference.test/three\n\n[use][three-space]\n",
+    )
+    .unwrap();
+    fs::write(directory.join("reference-escaped-label.md"), "[bracket\\] label]: https://reference.test/escaped \"A title\"\n\n[use][bracket\\] label]\n").unwrap();
     fs::write(directory.join("spans.html"), "https://repeat.test/a <a href=\"https://repeat.test/a\">one</a><a href='https://repeat.test/a'>two</a><a href=\"https://entity.test/a?x=1&amp;y=2\">entity</a><img src=https://unquoted.test/a alt=diagram>").unwrap();
     write_validation_docx(directory);
     write_validation_xlsx(directory);

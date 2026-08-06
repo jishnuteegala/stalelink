@@ -13,18 +13,18 @@ after nine outer process invocations; the parenthesized range is min-max.
 
 | Implementation | Aggregate docs/sec median (min-max) | In-process peak working set (MiB) | Cold completion median ms (min-max) | Cold peak working set (MiB) |
 | --- | ---: | ---: | ---: | ---: |
-| Rust production extraction API | 199.02 (195.65-203.19) | 225.02 | 2,110 (2,079-2,159) | 224.01 |
-| Go throwaway port | 90.62 (88.65-92.95) | 146.78 | 3,782 (3,679-4,009) | 122.65 |
+| Rust production extraction API | 206.13 (199.76-209.02) | 224.98 | 2,037 (1,997-2,116) | 223.98 |
+| Go throwaway port | 92.69 (90.22-93.60) | 140.77 | 3,681 (3,598-3,974) | 142.76 |
 
 | Format | Rust docs/sec median (min-max) | Go docs/sec median (min-max) |
 | --- | ---: | ---: |
-| Markdown | 236.87 (227.07-240.99) | 90.87 (87.18-91.42) |
-| HTML | 215.77 (194.50-217.08) | 83.10 (80.36-84.38) |
-| Plain text | 246.19 (241.66-250.18) | 83.82 (82.94-85.42) |
-| DOCX | 250.06 (240.95-255.88) | 148.82 (143.56-152.14) |
-| XLSX | 246.69 (239.51-249.61) | 137.43 (130.50-138.83) |
-| PPTX | 254.70 (245.14-259.83) | 136.40 (70.40-138.09) |
-| PDF | 222.00 (216.85-225.54) | 86.55 (83.49-86.92) |
+| Markdown | 242.64 (237.91-250.40) | 90.77 (89.89-91.60) |
+| HTML | 225.90 (216.43-231.56) | 83.82 (78.43-84.82) |
+| Plain text | 254.47 (246.51-259.61) | 83.78 (82.66-84.91) |
+| DOCX | 257.38 (234.23-266.38) | 151.59 (147.50-152.60) |
+| XLSX | 249.01 (228.63-259.59) | 136.82 (127.24-137.97) |
+| PPTX | 255.55 (254.12-260.81) | 135.56 (127.99-137.54) |
+| PDF | 224.67 (205.32-228.56) | 86.21 (82.56-87.18) |
 
 Host: Windows 11 Home 10.0.26200 (build 26200), Intel Core i7-11800H at
 2.30 GHz (8 cores, 16 logical processors), 15.68 GiB RAM; rustc 1.89.0 and Go
@@ -53,7 +53,8 @@ be zero, parses JSON receipts, and checks a canonical digest of every record
 against the opposite implementation and the baseline on every aggregate trial.
 Before any timing it independently generates a validation-only fixture set and
 requires full structured-record equality. It also parity-checks the baseline,
-cold trials, aggregate trials, and one baseline receipt for every format.
+cold trials, aggregate trials, every per-format baseline, and every timed
+per-format receipt against its opposite-language baseline.
 
 Cold completion is process launch through full-corpus extraction, JSON receipt
 emission, and process exit. It uses 10 fresh-process trials in alternating Rust

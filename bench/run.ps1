@@ -153,6 +153,9 @@ try {
       for ($iteration = 0; $iteration -lt $Iterations; $iteration++) {
         $run = Invoke-Harness $name $program @('throughput', $corpus, $WarmupPasses, $TimedPasses, $format)
         Assert-DocumentCount $run $expectedFormatDocuments "per-format $format throughput iteration $iteration $name"
+        $candidate = [pscustomobject]@{ Receipt=$run.Receipt }
+        $reference = if ($name -eq 'Rust') { [pscustomobject]@{ Receipt=$baselineFormatGo.Receipt } } else { [pscustomobject]@{ Receipt=$baselineFormatRust.Receipt } }
+        Assert-Equivalent $candidate $reference "per-format $format throughput iteration $iteration $name" | Out-Null
         $samples += ($run.Receipt.documents / [double]$run.Receipt.median_seconds)
       }
       $ordered = $samples | Sort-Object
