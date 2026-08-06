@@ -8,16 +8,18 @@ const root = path.resolve(__dirname, "..");
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "stalelink-npm-smoke-"));
 const packageDir = path.join(temp, "package");
 
+// GNU tar treats colons in paths as remote hosts and MSYS builds want unix-style
+// paths; BSD tar (macOS, Windows runners) has neither trait and takes native paths.
+const gnuTar = (() => {
+  const probe = spawnSync("tar", ["--version"], { encoding: "utf8" });
+  return Boolean(probe.stdout && probe.stdout.includes("GNU tar"));
+})();
+const tarLocalFlags = gnuTar ? ["--force-local"] : [];
+
 function tarPath(value) {
-  if (process.platform !== "win32") return value;
+  if (process.platform !== "win32" || !gnuTar) return value;
   return value.replace(/^([A-Z]):\\/i, (_, drive) => `/${drive.toLowerCase()}/`).replaceAll("\\", "/");
 }
-
-// GNU tar treats colons in paths as remote hosts; BSD tar has no --force-local.
-const tarLocalFlags = (() => {
-  const probe = spawnSync("tar", ["--version"], { encoding: "utf8" });
-  return probe.stdout && probe.stdout.includes("GNU tar") ? ["--force-local"] : [];
-})();
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
