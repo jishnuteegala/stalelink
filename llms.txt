@@ -1,19 +1,19 @@
 # stalelink
 
-stalelink is a local Rust CLI for scanning PDF, DOCX, XLSX, PPTX, Markdown, HTML, and text documents for dead, redirected, stale, authenticated, malformed, and broken local links. It can produce table, JSON, and SARIF reports, caches HTTP verdicts locally, and previews or applies safe link fixes.
+> stalelink is a local Rust CLI for scanning documents for dead, redirected, stale, authenticated, malformed, and broken local links. It produces table, JSON, and SARIF reports, caches HTTP verdicts locally, and previews or applies safe link fixes.
 
 Repository: https://github.com/jishnuteegala/stalelink
 License: MIT
 
-## Commands
+## Project
 
-- `stalelink scan <paths>` scans recursively. Use `--format json` or `--format sarif` for machine output.
-- `stalelink fix <paths>` previews suggested replacements. Add `--write`, `--backup`, or `--copy` to persist fixes.
-- `stalelink cache stats|clear` inspects or removes the local SQLite verdict cache.
-- `stalelink completions bash|zsh|fish|powershell` writes a shell completion script to stdout.
+- [README](README.md)
+- [Report JSON schema](schema/stalelink-report.v1.json)
+- [License](LICENSE)
 
-## Operational contract
+## Documentation
 
-Findings and fix diffs are stdout-only. Diagnostics, warnings, progress, and `-v` traces are stderr-only. Exit codes are 0 for clean/successful dry runs, 1 for report findings meeting `--fail-on` or refused/failed fixes, 2 for usage/configuration errors, and 3 for environment setup failures. Configuration precedence is flags, environment, nearest `stalelink.toml`, then defaults.
+- [Domain context](CONTEXT.md)
+- [Agent documentation](docs/agents/)
 
 No telemetry is collected. Requested link checks make network requests and their verdicts are cached locally unless `--no-cache` is used.

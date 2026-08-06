@@ -18,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 clap_complete.workspace = true
-stalelink-core = { path = "../stalelink-core" }
+stalelink-core = { version = "0.1.0", path = "../stalelink-core" }
 regex.workspace = true
 tokio.workspace = true
 chrono.workspace = true

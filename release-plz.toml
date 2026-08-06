@@ -3,6 +3,13 @@ changelog_config = "cliff.toml"
 publish = false
 
 [[package]]
+name = "stalelink-core"
+changelog_update = true
+git_tag_enable = false
+git_release_enable = false
+publish = true
+
+[[package]]
 name = "stalelink"
 changelog_update = true
 git_tag_enable = true

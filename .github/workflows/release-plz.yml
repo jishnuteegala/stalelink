@@ -18,5 +18,24 @@ jobs:
       - uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr
+          version: 0.3.130
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: release-pr
+    # `release` is a no-op except when the merged release PR is present.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
+          version: 0.3.130
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

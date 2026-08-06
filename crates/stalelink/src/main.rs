@@ -21,7 +21,7 @@ use stalelink_core::{
     fix::{fixer_for, pdf_refusal},
     model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
     report::{ReportSink, TableSink},
-    scan::{NoProgress, Progress, ScanInput, scan},
+    scan::{Progress, ScanInput, scan},
     walk::{WalkOptions, detect_format},
 };
 use tempfile::NamedTempFile;
@@ -280,6 +280,47 @@ impl Progress for StderrProgress {
     }
 }
 
+struct VerboseProgress {
+    verbose: u8,
+    cache_enabled: bool,
+    refresh: bool,
+    auth_cap: Auth,
+}
+
+impl Progress for VerboseProgress {
+    fn checking(&self, url: &url::Url) {
+        trace_at(
+            self.verbose,
+            2,
+            false,
+            format_args!(
+                "check url={url} tier-cap={:?} cache={} refresh={}",
+                self.auth_cap, self.cache_enabled, self.refresh
+            ),
+        );
+    }
+
+    fn checked(&self, url: &url::Url, verdict: Option<&stalelink_core::model::Verdict>) {
+        match verdict {
+            Some(verdict) => trace_at(
+                self.verbose,
+                3,
+                false,
+                format_args!(
+                    "response url={url} tier={} confidence={:?} reason={:?} evidence={:?}",
+                    verdict.tier, verdict.confidence, verdict.reason, verdict.evidence
+                ),
+            ),
+            None => trace_at(
+                self.verbose,
+                3,
+                false,
+                format_args!("response url={url} clean"),
+            ),
+        }
+    }
+}
+
 fn use_color(requested: Color, is_terminal: bool, no_color: bool) -> bool {
     match requested {
         Color::Always => true,
@@ -289,7 +330,11 @@ fn use_color(requested: Color, is_terminal: bool, no_color: bool) -> bool {
 }
 
 fn trace(verbose: u8, quiet: bool, message: impl std::fmt::Display) {
-    if verbose > 0 && !quiet {
+    trace_at(verbose, 1, quiet, message);
+}
+
+fn trace_at(verbose: u8, level: u8, quiet: bool, message: impl std::fmt::Display) {
+    if verbose >= level && !quiet {
         eprintln!("trace: {message}");
     }
 }
@@ -441,6 +486,18 @@ fn scan_common(
         eprintln!("error: --max-concurrency and --per-host must be at least 1");
         return Err(USAGE);
     }
+    trace(
+        verbose,
+        quiet,
+        format_args!(
+            "configuration concurrency={} per-host={} timeout={} retries={} cache-ttl={}",
+            settings.network.max_concurrency,
+            settings.network.per_host,
+            humantime::format_duration(settings.network.timeout),
+            settings.network.retries,
+            humantime::format_duration(settings.cache.ttl),
+        ),
+    );
     // Validate argument values (usage errors) before any path or environment
     // check, so a bad regex reports exit 2 regardless of whether a path exists.
     let exclude_urls = match args
@@ -646,11 +703,17 @@ fn scan_common(
     let checker =
         auth::AuthChecker::new(tier1, tier2, Option::<auth::UnavailablePageTier>::None, cap);
     let show_progress = !quiet && io::stderr().is_terminal();
+    let verbose_progress = VerboseProgress {
+        verbose,
+        cache_enabled: !network.no_cache,
+        refresh: network.refresh,
+        auth_cap: selected_auth,
+    };
     let result = if network.no_cache {
         if show_progress {
             runtime.block_on(scan(input, &checker, &StderrProgress))
         } else {
-            runtime.block_on(scan(input, &checker, &NoProgress))
+            runtime.block_on(scan(input, &checker, &verbose_progress))
         }
     } else {
         let cache = match cache::VerdictCache::open(cache_path) {
@@ -670,7 +733,7 @@ fn scan_common(
         let result = if show_progress {
             runtime.block_on(scan(input, &checker, &StderrProgress))
         } else {
-            runtime.block_on(scan(input, &checker, &NoProgress))
+            runtime.block_on(scan(input, &checker, &verbose_progress))
         };
         if let Some(error) = checker.error() {
             eprintln!("error: {error}");

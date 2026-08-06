@@ -1,0 +1,7 @@
+{
+  "name": "stalelink-release-checks",
+  "private": true,
+  "scripts": {
+    "test": "node scripts/test-npm-installer.js"
+  }
+}

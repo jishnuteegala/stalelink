@@ -302,3 +302,22 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  publish-npm:
+    needs:
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download npm installer
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish generated npm installer
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish artifacts/stalelink-npm-package.tar.gz

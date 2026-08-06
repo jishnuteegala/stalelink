@@ -141,6 +141,44 @@ fn verbose_writes_traces_to_stderr_only() {
         .stderr(predicate::str::contains("trace: resolving configuration"));
 }
 
+#[tokio::test]
+async fn verbosity_levels_add_url_and_response_details() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let url = format!("{}/clean", server.uri());
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    std::fs::write(file.path(), url).unwrap();
+
+    let output = util::command()
+        .args(["-v", "scan", "--no-cache", file.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let single = String::from_utf8(output.stderr).unwrap();
+    assert!(single.contains("configuration"));
+    assert!(!single.contains("check url="));
+
+    let output = util::command()
+        .args(["-vv", "scan", "--no-cache", file.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let double = String::from_utf8(output.stderr).unwrap();
+    assert!(double.contains("check url="));
+    assert!(!double.contains("response url="));
+
+    let output = util::command()
+        .args(["-vvv", "scan", "--no-cache", file.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let triple = String::from_utf8(output.stderr).unwrap();
+    assert!(triple.contains("response url="));
+}
+
 #[test]
 fn unknown_toml_key_is_a_usage_error_with_suggestion() {
     let directory = tempfile::tempdir().unwrap();

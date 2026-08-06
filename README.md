@@ -16,9 +16,8 @@ The first tagged release will activate the package-manager channels below. Until
 | --- | --- |
 | Cargo | `cargo install stalelink` (coming with first release) |
 | npm | `npm install -g stalelink` (coming with first release) |
-| Homebrew | `brew install jishnuteegala/tap/stalelink` (coming with first release) |
-| Scoop | `scoop install stalelink` (coming with first release) |
-| WinGet | `winget install JishnuTeegala.Stalelink` (coming with first release) |
+| Shell | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.sh | sh` (coming with first release) |
+| PowerShell | `irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.ps1 | iex` (coming with first release) |
 | Source | `cargo install --path crates/stalelink` |
 
 ## Scan Links
@@ -102,7 +101,7 @@ The JSON schema is [`schema/stalelink-report.v1.json`](schema/stalelink-report.v
 
 ## Release Channels
 
-The repository is configured for draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, including checksums and shell/PowerShell installers. `release-plz` maintains the human-merged release PR; the release workflow builds and uploads artifacts only after that PR creates a tag. Homebrew, Scoop, WinGet, nFPM, and AUR templates are activated only after the first public release.
+The repository is configured for draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, including checksums, shell/PowerShell installers, and cargo-dist's generated `stalelink` npm installer. `release-plz` maintains the human-reviewed release PR. After a maintainer merges that PR, its post-merge `release` step publishes `stalelink-core` then `stalelink` to crates.io, creates the version tag and GitHub release, and triggers the cargo-dist workflow. The repository owner must configure the `CARGO_REGISTRY_TOKEN` Actions secret before the first crates.io release, and `NPM_TOKEN` before the generated npm installer can publish. The release workflow creates the GitHub Release as a draft; a maintainer publishes that draft after reviewing its artifacts. Homebrew, Scoop, WinGet, nFPM, and AUR files under `packaging/` are unimplemented manual examples, not release channels.
 
 ## License
 
