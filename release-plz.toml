@@ -15,6 +15,9 @@ publish = true
 name = "stalelink"
 changelog_update = true
 git_tag_enable = true
+# One product tag (not the stalelink-v* package default): it must match
+# cliff.toml's tag_pattern and the release workflow's tag trigger.
+git_tag_name = "v{{ version }}"
 # cargo-dist owns the draft GitHub Release and its artifacts.
 git_release_enable = false
 publish = true
