@@ -477,6 +477,48 @@ async fn bare_pdf_text_url_is_refused_and_pdf_exclusion_skips_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pdf_exclusion_does_not_skip_text_fixes() {
+    let server = redirect_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let text = directory.path().join("note.txt");
+    let pdf_file = directory.path().join("note.pdf");
+    let old = format!("{}{OLD_PATH}", server.uri());
+    fs::write(&text, &old).unwrap();
+    let original_pdf = pdf(&old, true, "", "");
+    fs::write(&pdf_file, &original_pdf).unwrap();
+
+    fix(
+        directory.path(),
+        &[
+            "--write",
+            "--fix-exclude",
+            "pdf",
+            "--min-fix-confidence",
+            "outdated",
+        ],
+    )
+    .code(0)
+    .stderr("");
+    assert!(fs::read_to_string(text).unwrap().contains("/new?x=1&y=2"));
+    assert_eq!(fs::read(&pdf_file).unwrap(), original_pdf);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_pdf_without_plaintext_url_is_refused_by_preflight() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("encrypted.pdf");
+    let bytes = pdf("not-a-url", false, "/Encrypt 7 0 R", "");
+    fs::write(&file, &bytes).unwrap();
+
+    fix(&file, &["--write"])
+        .code(1)
+        .stderr(predicates::str::contains(
+            "encrypted PDF files are not modified",
+        ));
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn binary_backup_and_copy_preserve_original_and_write_fixed_copy() {
     let server = redirect_server().await;
     let directory = tempfile::tempdir().unwrap();

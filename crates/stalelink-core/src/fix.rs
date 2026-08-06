@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    extract::{SourceDocument, extract},
+    extract::{SourceDocument, encode_pdf_string, extract},
     model::{DocFormat, Finding},
 };
 
@@ -88,6 +88,7 @@ impl Fixer for OoxmlFixer {
                 touched.insert(name, fixed);
             }
         }
+        reject_unpreservable_untouched_metadata(original, &touched)?;
         for (index, (old, _)) in replacements.iter().enumerate() {
             if !changed[index] {
                 return Err(FixError(format!(
@@ -128,12 +129,7 @@ impl Fixer for PdfFixer {
     fn fix(&self, original: &[u8], findings: &[Finding]) -> Result<Vec<u8>, FixError> {
         let document = lopdf::Document::load_mem(original)
             .map_err(|error| FixError(format!("reading PDF: {error}")))?;
-        if document.is_encrypted() {
-            return Err(FixError("encrypted PDF files are not modified".into()));
-        }
-        if signed_pdf(&document) {
-            return Err(FixError("signed PDF files are not modified".into()));
-        }
+        pdf_refusal(&document)?;
         if findings.iter().any(|finding| {
             matches!(
                 finding.source.location,
@@ -198,7 +194,7 @@ impl Fixer for PdfFixer {
             };
             for (index, (old, replacement)) in replacements.iter().enumerate() {
                 if uri.as_slice() == old.as_bytes() {
-                    *uri = replacement.as_bytes().to_vec();
+                    *uri = encode_pdf_string(replacement);
                     changed[index] = true;
                 }
             }
@@ -219,16 +215,26 @@ impl Fixer for PdfFixer {
 }
 
 fn replacements(findings: &[Finding]) -> Result<Vec<(String, String)>, FixError> {
-    findings
-        .iter()
-        .map(|finding| {
-            finding
-                .fix
-                .as_ref()
-                .map(|fix| (finding.url.clone(), fix.replacement_url.clone()))
-                .ok_or_else(|| FixError(format!("{} has no suggested fix", finding.url)))
-        })
-        .collect()
+    let mut replacements = Vec::new();
+    for finding in findings {
+        let replacement = finding
+            .fix
+            .as_ref()
+            .ok_or_else(|| FixError(format!("{} has no suggested fix", finding.url)))?
+            .replacement_url
+            .clone();
+        if let Some((_, existing)) = replacements.iter().find(|(old, _)| old == &finding.url) {
+            if existing != &replacement {
+                return Err(FixError(format!(
+                    "conflicting replacements for {}: {existing} and {replacement}",
+                    finding.url
+                )));
+            }
+        } else {
+            replacements.push((finding.url.clone(), replacement));
+        }
+    }
+    Ok(replacements)
 }
 
 fn is_ooxml_link_part(name: &str) -> bool {
@@ -241,32 +247,21 @@ fn replace_urls(
     replacements: &[(String, String)],
     changed: &mut [bool],
 ) -> Vec<u8> {
-    let mut fixed = bytes.to_vec();
-    for (index, (old, replacement)) in replacements.iter().enumerate() {
-        let mut position = 0;
-        while let Some(offset) = fixed[position..]
-            .windows(old.len())
-            .position(|window| window == old.as_bytes())
-        {
-            let start = position + offset;
-            let prefix = &fixed[start.saturating_sub(128)..start];
-            let relationship_target = name.ends_with(".rels")
-                && (prefix.ends_with(b"Target=\"") || prefix.ends_with(b"Target='"));
-            let field_code = !name.ends_with(".rels")
-                && prefix
-                    .windows(b"HYPERLINK".len())
-                    .any(|window| window == b"HYPERLINK");
-            if !relationship_target && !field_code {
-                position = start + old.len();
-                continue;
+    let mut edits = Vec::new();
+    for (range, value, field_code) in xml_values(name, bytes) {
+        for (index, (old, replacement)) in replacements.iter().enumerate() {
+            if (name.ends_with(".rels") || field_code)
+                && let Some(range) = xml_subrange(bytes, &range, &value, old)
+            {
+                edits.push(Edit {
+                    span: range,
+                    replacement: xml_escape(replacement).into_bytes(),
+                });
+                changed[index] = true;
             }
-            let replacement = xml_escape(replacement);
-            fixed.splice(start..start + old.len(), replacement.bytes());
-            position = start + replacement.len();
-            changed[index] = true;
         }
     }
-    fixed
+    apply_edits(bytes, &edits).unwrap_or_else(|_| bytes.to_vec())
 }
 
 fn xml_escape(value: &str) -> String {
@@ -278,24 +273,248 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn xml_values(name: &str, bytes: &[u8]) -> Vec<(Range<usize>, String, bool)> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut values = Vec::new();
+    if name.ends_with(".rels") {
+        let mut position = 0;
+        while let Some(offset) = text[position..].find("Target=") {
+            let quote = position + offset + "Target=".len();
+            let Some(&delimiter) = bytes.get(quote) else {
+                break;
+            };
+            if !matches!(delimiter, b'\'' | b'\"') {
+                position = quote;
+                continue;
+            }
+            let start = quote + 1;
+            let Some(end) = bytes[start..].iter().position(|&byte| byte == delimiter) else {
+                break;
+            };
+            let end = start + end;
+            values.push((start..end, xml_unescape(&text[start..end]), false));
+            position = end + 1;
+        }
+        return values;
+    }
+
+    let mut position = 0;
+    while let Some(tag_offset) = text[position..].find('<') {
+        let tag_start = position + tag_offset;
+        let Some(tag_end) = text[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + tag_end;
+        let tag = &text[tag_start..=tag_end];
+        let instruction = tag.contains("instrText") || tag.contains("fldSimple");
+        if instruction {
+            if tag.contains("fldSimple") {
+                if let Some((range, value)) = attribute_value(bytes, tag_start, tag_end, b"instr") {
+                    values.push((range, value, true));
+                }
+            } else if !tag.starts_with("</") {
+                let content_start = tag_end + 1;
+                if let Some(close) = text[content_start..].find("</") {
+                    let content_end = content_start + close;
+                    values.push((
+                        content_start..content_end,
+                        xml_unescape(&text[content_start..content_end]),
+                        true,
+                    ));
+                }
+            }
+        }
+        position = tag_end + 1;
+    }
+    values
+}
+
+fn attribute_value(
+    bytes: &[u8],
+    tag_start: usize,
+    tag_end: usize,
+    name: &[u8],
+) -> Option<(Range<usize>, String)> {
+    let tag = &bytes[tag_start..=tag_end];
+    let offset = tag.windows(name.len() + 2).position(|window| {
+        window[..name.len()] == *name
+            && window[name.len()] == b'='
+            && matches!(window[name.len() + 1], b'\'' | b'\"')
+    })?;
+    let start = tag_start + offset + name.len() + 2;
+    let delimiter = bytes[start - 1];
+    let end = start
+        + bytes[start..tag_end]
+            .iter()
+            .position(|&byte| byte == delimiter)?;
+    Some((
+        start..end,
+        xml_unescape(&String::from_utf8_lossy(&bytes[start..end])),
+    ))
+}
+
+fn xml_unescape(value: &str) -> String {
+    html_escape::decode_html_entities(value).to_string()
+}
+
+fn xml_subrange(
+    bytes: &[u8],
+    range: &Range<usize>,
+    value: &str,
+    old: &str,
+) -> Option<Range<usize>> {
+    let semantic_start = value.find(old)?;
+    let semantic_end = semantic_start + old.len();
+    let raw = std::str::from_utf8(&bytes[range.clone()]).ok()?;
+    let mut semantic = 0;
+    let mut start = None;
+    let mut end = None;
+    let mut raw_position = 0;
+    while raw_position < raw.len() {
+        if semantic == semantic_start {
+            start = Some(raw_position);
+        }
+        if semantic == semantic_end {
+            end = Some(raw_position);
+            break;
+        }
+        let next = if raw.as_bytes()[raw_position] == b'&' {
+            raw[raw_position..]
+                .find(';')
+                .map(|offset| raw_position + offset + 1)?
+        } else {
+            raw_position + raw[raw_position..].chars().next()?.len_utf8()
+        };
+        semantic += xml_unescape(&raw[raw_position..next]).len();
+        raw_position = next;
+    }
+    if semantic == semantic_end {
+        end.get_or_insert(raw_position);
+    }
+    Some(range.start + start?..range.start + end?)
+}
+
+fn reject_unpreservable_untouched_metadata(
+    original: &[u8],
+    touched: &std::collections::HashMap<String, Vec<u8>>,
+) -> Result<(), FixError> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(original))
+        .map_err(|error| FixError(format!("reading OOXML archive: {error}")))?;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| FixError(error.to_string()))?;
+        if !touched.contains_key(entry.name())
+            && entry.extra_data().is_some_and(|extra| !extra.is_empty())
+        {
+            return Err(FixError(format!(
+                "untouched OOXML entry {} has ZIP extra metadata that cannot be preserved",
+                entry.name()
+            )));
+        }
+    }
+    let mut position = 0;
+    while let Some(offset) = original[position..]
+        .windows(4)
+        .position(|value| value == b"PK\x01\x02")
+    {
+        let header = position + offset;
+        let Some(lengths) = original.get(header + 28..header + 34) else {
+            break;
+        };
+        let name_length = u16::from_le_bytes([lengths[0], lengths[1]]) as usize;
+        let extra_length = u16::from_le_bytes([lengths[2], lengths[3]]) as usize;
+        let name_start = header + 46;
+        let Some(name) = original.get(name_start..name_start + name_length) else {
+            break;
+        };
+        let name = String::from_utf8_lossy(name);
+        if !touched.contains_key(name.as_ref()) && extra_length != 0 {
+            return Err(FixError(format!(
+                "untouched OOXML entry {name} has central ZIP extra metadata that cannot be preserved"
+            )));
+        }
+        position = name_start + name_length + extra_length;
+    }
+    Ok(())
+}
+
+pub fn pdf_refusal(document: &lopdf::Document) -> Result<(), FixError> {
+    if document.is_encrypted() {
+        return Err(FixError("encrypted PDF files are not modified".into()));
+    }
+    if signed_pdf(document) {
+        return Err(FixError("signed PDF files are not modified".into()));
+    }
+    if direct_link_annotation(document) {
+        return Err(FixError(
+            "PDF files with direct link annotations are not modified".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn direct_link_annotation(document: &lopdf::Document) -> bool {
+    document.get_pages().into_values().any(|page_id| {
+        document
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|page| page.get(b"Annots").ok())
+            .and_then(|annotations| annotations.as_array().ok())
+            .is_some_and(|annotations| {
+                annotations.iter().any(|annotation| {
+                    annotation
+                        .as_dict()
+                        .ok()
+                        .and_then(|annotation| annotation.get(b"Subtype").ok())
+                        .and_then(|subtype| subtype.as_name().ok())
+                        .is_some_and(|subtype| subtype == b"Link")
+                })
+            })
+    })
+}
+
 fn signed_pdf(document: &lopdf::Document) -> bool {
-    if document.trailer.has(b"Perms") {
+    let Ok((_, root)) = document
+        .trailer
+        .get(b"Root")
+        .and_then(|root| document.dereference(root))
+    else {
+        return false;
+    };
+    let Ok(root) = root.as_dict() else {
+        return false;
+    };
+    if root.has(b"Perms") {
         return true;
     }
-    document.objects.values().any(|object| {
-        let Ok(dict) = object.as_dict() else {
-            return false;
-        };
-        dict.has(b"Perms")
-            || dict
+    root.get(b"AcroForm")
+        .and_then(|form| document.dereference(form))
+        .and_then(|(_, form)| form.as_dict())
+        .ok()
+        .is_some_and(|form| signature_field(document, form.get(b"Fields").ok()))
+}
+
+fn signature_field(document: &lopdf::Document, field: Option<&lopdf::Object>) -> bool {
+    let Some(field) = field else { return false };
+    match field {
+        lopdf::Object::Array(fields) => fields
+            .iter()
+            .any(|field| signature_field(document, Some(field))),
+        field => {
+            let Ok((_, field)) = document.dereference(field) else {
+                return false;
+            };
+            let Ok(field) = field.as_dict() else {
+                return false;
+            };
+            field
                 .get(b"FT")
                 .and_then(lopdf::Object::as_name)
                 .is_ok_and(|field_type| field_type == b"Sig")
-            || dict
-                .get(b"Type")
-                .and_then(lopdf::Object::as_name)
-                .is_ok_and(|object_type| object_type == b"Sig")
-    })
+                || signature_field(document, field.get(b"Kids").ok())
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -863,6 +1082,106 @@ mod tests {
     }
 
     #[test]
+    fn ooxml_fixes_escaped_relationships_and_field_values() {
+        let old = "https://old.test/x?a=1&b=2";
+        let replacement = "https://new.test/y?a=3&b=4";
+        let original = archive(&[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationship Target="https://old.test/x?a=1&amp;b=2"/>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document><w:fldSimple w:instr="HYPERLINK &quot;https://old.test/x?a=1&amp;b=2&quot;"/><w:instrText>HYPERLINK &quot;https://old.test/x?a=1&amp;b=2&quot;</w:instrText></w:document>"#,
+            ),
+        ]);
+        let finding = binary_finding(
+            DocFormat::Docx,
+            old,
+            replacement,
+            Location::Docx { paragraph: 1 },
+        );
+        let fixed = OoxmlFixer.fix(&original, &[finding]).unwrap();
+        let mut archive = zip::ZipArchive::new(Cursor::new(fixed)).unwrap();
+        let mut values = String::new();
+        archive
+            .by_name("word/_rels/document.xml.rels")
+            .unwrap()
+            .read_to_string(&mut values)
+            .unwrap();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut values)
+            .unwrap();
+        assert_eq!(values.matches("https://new.test/y?a=3&amp;b=4").count(), 3);
+    }
+
+    #[test]
+    fn ooxml_deduplicates_identical_findings_and_rejects_conflicts() {
+        let original = archive(&[(
+            "word/_rels/document.xml.rels",
+            r#"<Relationship Target="https://old.test/x"/>"#,
+        )]);
+        let finding = binary_finding(
+            DocFormat::Docx,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Docx { paragraph: 1 },
+        );
+        assert!(
+            OoxmlFixer
+                .fix(&original, &[finding.clone(), finding.clone()])
+                .is_ok()
+        );
+        let conflict = binary_finding(
+            DocFormat::Docx,
+            "https://old.test/x",
+            "https://new.test/z",
+            Location::Docx { paragraph: 1 },
+        );
+        assert!(
+            OoxmlFixer
+                .fix(&original, &[finding, conflict])
+                .unwrap_err()
+                .0
+                .contains("conflicting")
+        );
+    }
+
+    #[test]
+    fn ooxml_refuses_untouched_extra_metadata() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "word/_rels/document.xml.rels",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(br#"<Relationship Target="https://old.test/x"/>"#)
+            .unwrap();
+        let mut options = zip::write::FileOptions::default();
+        options.add_extra_data(0xdead, [1, 2, 3], false).unwrap();
+        writer.start_file("word/media/keep.bin", options).unwrap();
+        writer.write_all(b"keep").unwrap();
+        let original = writer.finish().unwrap().into_inner();
+        let finding = binary_finding(
+            DocFormat::Docx,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Docx { paragraph: 1 },
+        );
+        assert!(
+            OoxmlFixer
+                .fix(&original, &[finding])
+                .unwrap_err()
+                .0
+                .contains("extra metadata")
+        );
+    }
+
+    #[test]
     fn pdf_fix_is_append_only_and_updates_annotation_uri() {
         let original = pdf();
         let finding = binary_finding(
@@ -919,5 +1238,48 @@ mod tests {
                 .0
                 .contains("signed PDF")
         );
+    }
+
+    #[test]
+    fn pdf_deduplicates_findings_and_encodes_unicode_replacements() {
+        let original = pdf();
+        for replacement in ["https://new.test/café", "https://new.test/😀"] {
+            let finding = binary_finding(
+                DocFormat::Pdf,
+                "https://old.test/x",
+                replacement,
+                Location::Pdf {
+                    page: 1,
+                    annotation: Some(0),
+                },
+            );
+            let fixed = PdfFixer
+                .fix(&original, &[finding.clone(), finding])
+                .unwrap();
+            let links = extract(&SourceDocument {
+                path: PathBuf::new(),
+                format: DocFormat::Pdf,
+                bytes: fixed,
+            })
+            .unwrap();
+            assert_eq!(links[0].url, replacement);
+        }
+    }
+
+    #[test]
+    fn pdf_ignores_unrelated_perms_and_unsigned_acroform() {
+        let mut document = lopdf::Document::load_mem(&pdf()).unwrap();
+        document.objects.insert(
+            (9, 0),
+            lopdf::Object::Dictionary(lopdf::dictionary! { "Perms" => lopdf::Object::Null }),
+        );
+        document.objects.insert((8, 0), lopdf::Object::Dictionary(lopdf::dictionary! { "Fields" => lopdf::Object::Array(vec![lopdf::Object::Dictionary(lopdf::dictionary! { "FT" => lopdf::Object::Name(b"Tx".to_vec()) })]) }));
+        document
+            .get_object_mut((1, 0))
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("AcroForm", lopdf::Object::Reference((8, 0)));
+        assert!(!signed_pdf(&document));
     }
 }

@@ -17,11 +17,11 @@ use regex::Regex;
 use stalelink_core::{
     check::HttpChecker,
     extract::{SourceDocument, extract},
-    fix::fixer_for,
+    fix::{fixer_for, pdf_refusal},
     model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
     report::{ReportSink, TableSink},
     scan::{NoProgress, Progress, ScanInput, scan},
-    walk::WalkOptions,
+    walk::{WalkOptions, detect_format, walk},
 };
 use tempfile::NamedTempFile;
 
@@ -219,7 +219,7 @@ enum Browser {
     Firefox,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FixExclude {
     Pdf,
     Redirect,
@@ -521,10 +521,12 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
     };
     let minimum = Confidence::from(args.min_fix_confidence);
     let mut by_path: BTreeMap<PathBuf, Vec<Finding>> = BTreeMap::new();
-    let mut refused = 0usize;
+    let mut refused = preflight_pdfs(&args);
     for finding in report.findings {
         let Some(fix) = &finding.fix else { continue };
-        if finding.verdict.confidence < minimum || excluded(fix.origin, &args.fix_exclude) {
+        if finding.verdict.confidence < minimum
+            || excluded(finding.source.format, fix.origin, &args.fix_exclude)
+        {
             continue;
         }
         if !matches!(fix.fixable, Fixability::Auto) {
@@ -601,14 +603,44 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
     ExitCode::from(if refused == 0 { CLEAN } else { 1 })
 }
 
-fn excluded(origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
+fn excluded(format: DocFormat, origin: FixOrigin, exclusions: &[FixExclude]) -> bool {
     exclusions.iter().any(|exclusion| match exclusion {
-        FixExclude::Pdf => true,
+        FixExclude::Pdf => format == DocFormat::Pdf,
         FixExclude::Redirect => origin == FixOrigin::RedirectTarget,
         FixExclude::UrlUpgrade => {
             matches!(origin, FixOrigin::HttpsUpgrade | FixOrigin::VersionUpgrade)
         }
     })
+}
+
+fn preflight_pdfs(args: &FixArgs) -> usize {
+    if args.fix_exclude.contains(&FixExclude::Pdf) {
+        return 0;
+    }
+    let Ok(paths) = walk(
+        &args.common.paths,
+        &WalkOptions {
+            include: args.common.include.clone(),
+            exclude: args.common.exclude.clone(),
+        },
+    ) else {
+        return 0;
+    };
+    let mut refused = 0;
+    for path in paths {
+        let Ok(bytes) = fs::read(&path) else { continue };
+        if detect_format(&path, &bytes) != Some(DocFormat::Pdf) {
+            continue;
+        }
+        let result = lopdf::Document::load_mem(&bytes)
+            .map_err(|error| format!("reading PDF: {error}"))
+            .and_then(|document| pdf_refusal(&document).map_err(|error| error.0));
+        if let Err(error) = result {
+            eprintln!("refused {}: {error}", path.display());
+            refused += 1;
+        }
+    }
+    refused
 }
 
 fn print_binary_summary(path: &Path, findings: &[Finding]) {
