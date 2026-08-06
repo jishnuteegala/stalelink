@@ -35,6 +35,10 @@ impl VerdictCache {
         }
         let connection =
             Connection::open(&path).map_err(|error| format!("opening cache: {error}"))?;
+        // Wait out cross-process contention instead of surfacing SQLITE_BUSY.
+        connection
+            .busy_timeout(Duration::from_secs(10))
+            .map_err(|error| error.to_string())?;
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| error.to_string())?;
