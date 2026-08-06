@@ -338,6 +338,14 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     ExitCode::from(exit_code)
 }
 
+fn tier3_unavailable(requested_auth: Option<Auth>) -> Result<(), u8> {
+    if matches!(requested_auth, Some(Auth::Browser)) {
+        Err(ENVIRONMENT)
+    } else {
+        Ok(())
+    }
+}
+
 fn scan_common(
     args: &CommonArgs,
     output: Option<&OutputArgs>,
@@ -562,10 +570,10 @@ fn scan_common(
     #[cfg(feature = "live-browser")]
     let tier3 = if matches!(selected_auth, Auth::Browser) {
         let profile = auth::browser_profile(&cache_path, browser);
-        let executable = if args.auth.cdp_url.is_some() {
-            Ok(None)
-        } else {
-            auth::discover_executable(browser).map(Some)
+        let executable = match auth::browser_launch(browser, args.auth.cdp_url.as_deref()) {
+            Ok(auth::BrowserLaunch::Attach) => Ok(None),
+            Ok(auth::BrowserLaunch::Launch) => auth::discover_executable(browser).map(Some),
+            Err(error) => Err(error),
         };
         match executable {
             Ok(executable) => match runtime.block_on(auth::CdpPageDriver::launch(
@@ -579,8 +587,8 @@ fn scan_common(
                         "warning: {} browser tier is unavailable ({error}); start it with remote debugging or check its installation",
                         browser.name()
                     );
-                    if matches!(requested_auth, Some(Auth::Browser)) {
-                        return Err(ENVIRONMENT);
+                    if let Err(exit_code) = tier3_unavailable(requested_auth) {
+                        return Err(exit_code);
                     }
                     None
                 }
@@ -590,8 +598,8 @@ fn scan_common(
                     "warning: {} browser tier is unavailable ({error}); install it or use --auth cookies",
                     browser.name()
                 );
-                if matches!(requested_auth, Some(Auth::Browser)) {
-                    return Err(ENVIRONMENT);
+                if let Err(exit_code) = tier3_unavailable(requested_auth) {
+                    return Err(exit_code);
                 }
                 None
             }
@@ -604,9 +612,7 @@ fn scan_common(
         eprintln!(
             "warning: browser tier is unavailable; install a live-browser build or use --auth cookies"
         );
-        if matches!(requested_auth, Some(Auth::Browser)) {
-            return Err(ENVIRONMENT);
-        }
+        tier3_unavailable(requested_auth)?;
     }
     #[cfg(feature = "live-browser")]
     let checker = auth::AuthChecker::new(tier1, tier2, tier3, cap);
@@ -1016,6 +1022,13 @@ mod tests {
         for (level, expected) in cases {
             assert_eq!(Confidence::from(level), expected);
         }
+    }
+
+    #[test]
+    fn explicitly_requested_unavailable_browser_tier_exits_three() {
+        assert_eq!(tier3_unavailable(Some(Auth::Browser)), Err(ENVIRONMENT));
+        assert_eq!(tier3_unavailable(Some(Auth::Cookies)), Ok(()));
+        assert_eq!(tier3_unavailable(None), Ok(()));
     }
 
     #[test]

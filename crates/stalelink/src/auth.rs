@@ -59,6 +59,24 @@ impl Browser {
 }
 
 #[cfg(any(test, feature = "live-browser"))]
+#[derive(Debug)]
+pub enum BrowserLaunch {
+    Attach,
+    Launch,
+}
+
+#[cfg(any(test, feature = "live-browser"))]
+pub fn browser_launch(browser: Browser, debug_url: Option<&str>) -> Result<BrowserLaunch, String> {
+    if debug_url.is_some() {
+        return Ok(BrowserLaunch::Attach);
+    }
+    if matches!(browser, Browser::Firefox) {
+        return Err("Firefox does not support the Chrome DevTools Protocol used for tier-3 checking; use --browser chrome|edge|brave|chromium, or attach via --cdp-url to an endpoint that speaks CDP".into());
+    }
+    Ok(BrowserLaunch::Launch)
+}
+
+#[cfg(any(test, feature = "live-browser"))]
 pub fn browser_profile(cache_dir: &Path, browser: Browser) -> PathBuf {
     cache_dir
         .join("browser-profiles")
@@ -871,6 +889,62 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct TierCalls {
+        tier1: std::sync::Arc<AtomicUsize>,
+        tier2: std::sync::Arc<AtomicUsize>,
+        tier3: std::sync::Arc<AtomicUsize>,
+    }
+
+    struct RecordingTier {
+        result: Option<Verdict>,
+        calls: TierCalls,
+    }
+    impl AuthTier for RecordingTier {
+        fn attempt(&self, _: Url) -> CheckFuture<'_> {
+            self.calls.tier1.fetch_add(1, Ordering::Relaxed);
+            let result = self.result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    struct RecordingCookie {
+        result: Attempt,
+        calls: TierCalls,
+    }
+    impl CookieTier for RecordingCookie {
+        fn attempt_cookie(
+            &self,
+            _: Url,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Attempt> + Send + '_>> {
+            self.calls.tier2.fetch_add(1, Ordering::Relaxed);
+            let result = match &self.result {
+                Attempt::Verdict(verdict) => Attempt::Verdict(verdict.clone()),
+                Attempt::Unavailable => Attempt::Unavailable,
+            };
+            Box::pin(async move { result })
+        }
+    }
+
+    struct RecordingPage {
+        result: PageAttempt,
+        calls: TierCalls,
+    }
+    impl PageTier for RecordingPage {
+        fn attempt_page(
+            &self,
+            _: Url,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PageAttempt> + Send + '_>> {
+            self.calls.tier3.fetch_add(1, Ordering::Relaxed);
+            let result = match &self.result {
+                PageAttempt::Clean => PageAttempt::Clean,
+                PageAttempt::Verdict(verdict) => PageAttempt::Verdict(verdict.clone()),
+                PageAttempt::Unavailable => PageAttempt::Unavailable,
+            };
+            Box::pin(async move { result })
+        }
+    }
+
     fn fake_verdict(reason: Reason) -> Verdict {
         Verdict {
             confidence: reason.confidence(),
@@ -883,41 +957,168 @@ mod tests {
 
     #[tokio::test]
     async fn auth_decision_table_covers_every_trigger_and_no_trigger() {
-        let url: Url = "https://github.com/private".parse().unwrap();
-        for reason in [
-            Reason::HttpStatus(401),
-            Reason::HttpStatus(403),
-            Reason::LoginWall,
-        ] {
+        async fn assert_row(
+            name: &str,
+            url: &str,
+            tier1: Option<Verdict>,
+            tier2: Attempt,
+            expected: (usize, usize, usize),
+        ) {
+            let calls = TierCalls::default();
             let checker = AuthChecker::new(
-                FakeTier(Some(fake_verdict(reason.clone()))),
-                Some(FakeCookie(Attempt::Verdict(None))),
-                Some(FakePage(PageAttempt::Clean)),
+                RecordingTier {
+                    result: tier1,
+                    calls: calls.clone(),
+                },
+                Some(RecordingCookie {
+                    result: tier2,
+                    calls: calls.clone(),
+                }),
+                Some(RecordingPage {
+                    result: PageAttempt::Clean,
+                    calls: calls.clone(),
+                }),
                 AuthCap::Browser,
             );
-            assert!(checker.check(url.clone()).await.is_none());
-        }
-        for status in [429, 503] {
-            let checker = AuthChecker::new(
-                FakeTier(Some(fake_verdict(Reason::HttpStatus(status)))),
-                Some(FakeCookie(Attempt::Verdict(None))),
-                Some(FakePage(PageAttempt::Clean)),
-                AuthCap::Browser,
+            let _ = checker.check(url.parse().unwrap()).await;
+            assert_eq!(
+                (
+                    calls.tier1.load(Ordering::Relaxed),
+                    calls.tier2.load(Ordering::Relaxed),
+                    calls.tier3.load(Ordering::Relaxed),
+                ),
+                expected,
+                "{name}"
             );
-            assert!(checker.check(url.clone()).await.is_none());
         }
-        for reason in [
-            Reason::Soft404,
-            Reason::NetworkError(stalelink_core::model::NetKind::Dns),
-        ] {
-            let checker = AuthChecker::new(
-                FakeTier(Some(fake_verdict(reason.clone()))),
-                Some(FakeCookie(Attempt::Verdict(None))),
-                Some(FakePage(PageAttempt::Clean)),
-                AuthCap::Browser,
-            );
-            assert_eq!(checker.check(url.clone()).await.unwrap().reason, reason);
-        }
+
+        assert_row(
+            "tier-1 401 triggers tier 2",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::HttpStatus(401))),
+            Attempt::Verdict(None),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "tier-1 403 triggers tier 2",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::HttpStatus(403))),
+            Attempt::Verdict(None),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "tier-1 login wall triggers tier 2",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::LoginWall)),
+            Attempt::Verdict(None),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "known-host 429 triggers tier 2",
+            "https://github.com/private",
+            Some(fake_verdict(Reason::HttpStatus(429))),
+            Attempt::Verdict(None),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "known-host 503 triggers tier 2",
+            "https://github.com/private",
+            Some(fake_verdict(Reason::HttpStatus(503))),
+            Attempt::Verdict(None),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "unknown-host 429 does not trigger",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::HttpStatus(429))),
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "unknown-host 503 does not trigger",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::HttpStatus(503))),
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "ordinary 404 does not trigger",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::HttpStatus(404))),
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "ordinary 200 does not trigger",
+            "https://example.test/private",
+            None,
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "soft 404 does not trigger",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::Soft404)),
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "DNS failure does not trigger",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::NetworkError(
+                stalelink_core::model::NetKind::Dns,
+            ))),
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "clean tier-1 result does not trigger",
+            "https://example.test/private",
+            None,
+            Attempt::Verdict(None),
+            (1, 0, 0),
+        )
+        .await;
+        assert_row(
+            "tier-2 ordinary verdict does not trigger tier 3",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::LoginWall)),
+            Attempt::Verdict(Some(fake_verdict(Reason::HttpStatus(404)))),
+            (1, 1, 0),
+        )
+        .await;
+        assert_row(
+            "tier-2 auth wall triggers tier 3",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::LoginWall)),
+            Attempt::Verdict(Some(fake_verdict(Reason::LoginWall))),
+            (1, 1, 1),
+        )
+        .await;
+        let mut challenge = fake_verdict(Reason::HttpStatus(403));
+        challenge.evidence.push(Evidence {
+            kind: "body".into(),
+            detail: "bot challenge".into(),
+        });
+        assert_row(
+            "tier-2 bot challenge triggers tier 3",
+            "https://example.test/private",
+            Some(fake_verdict(Reason::LoginWall)),
+            Attempt::Verdict(Some(challenge)),
+            (1, 1, 1),
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -963,6 +1164,23 @@ mod tests {
             browser_profile(cache, Browser::Chrome),
             browser_profile(cache, Browser::Brave)
         );
+    }
+
+    #[test]
+    fn firefox_launch_is_refused_but_cdp_attach_is_browser_agnostic() {
+        let error = browser_launch(Browser::Firefox, None).unwrap_err();
+        assert!(error.contains("Firefox"));
+        assert!(error.contains("does not support the Chrome DevTools Protocol"));
+        assert!(error.contains("--browser chrome|edge|brave|chromium"));
+        assert!(error.contains("--cdp-url"));
+        assert!(matches!(
+            browser_launch(Browser::Firefox, Some("http://fake-cdp.test:9222")),
+            Ok(BrowserLaunch::Attach)
+        ));
+        assert!(matches!(
+            browser_launch(Browser::Chrome, Some("http://fake-cdp.test:9222")),
+            Ok(BrowserLaunch::Attach)
+        ));
     }
 
     #[tokio::test]
