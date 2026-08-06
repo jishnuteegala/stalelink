@@ -1,0 +1,11 @@
+{
+  "version": "{{ version }}",
+  "description": "Find dead and outdated links in local documents",
+  "homepage": "https://github.com/jishnuteegala/stalelink",
+  "license": "MIT",
+  "architecture": {
+    "64bit": { "url": "{{ windows_x64_url }}", "hash": "{{ windows_x64_sha256 }}" },
+    "arm64": { "url": "{{ windows_arm64_url }}", "hash": "{{ windows_arm64_sha256 }}" }
+  },
+  "bin": "stalelink.exe"
+}

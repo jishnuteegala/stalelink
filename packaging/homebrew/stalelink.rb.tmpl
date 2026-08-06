@@ -1,0 +1,18 @@
+# Activated after the first GitHub release.
+class Stalelink < Formula
+  desc "Find dead and outdated links in local documents"
+  homepage "https://github.com/jishnuteegala/stalelink"
+  version "{{ version }}"
+  on_macos do
+    if Hardware::CPU.arm?
+      url "{{ darwin_arm64_url }}"
+      sha256 "{{ darwin_arm64_sha256 }}"
+    else
+      url "{{ darwin_x64_url }}"
+      sha256 "{{ darwin_x64_sha256 }}"
+    end
+  end
+  def install
+    bin.install "stalelink"
+  end
+end

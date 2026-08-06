@@ -44,6 +44,8 @@ pub trait Progress {
     fn files_walked(&self, _: usize) {}
     fn links_found(&self, _: usize) {}
     fn checks_done(&self, _: usize) {}
+    fn checking(&self, _: &Url) {}
+    fn checked(&self, _: &Url, _: Option<&Verdict>) {}
 }
 pub struct NoProgress;
 impl Progress for NoProgress {}
@@ -108,18 +110,20 @@ pub async fn scan(
             async move {
                 let permit = semaphore.acquire_owned().await.map_err(|e| e.to_string())?;
                 let parsed = Url::parse(&url).map_err(|e| e.to_string())?;
-                let verdict = checker.check(parsed).await;
+                progress.checking(&parsed);
+                let verdict = checker.check(parsed.clone()).await;
                 drop(permit);
-                Ok::<_, String>((occurrences, verdict))
+                Ok::<_, String>((parsed, occurrences, verdict))
             }
         })
         .buffer_unordered(input.max_concurrency);
     let mut checked = local_checked;
     let mut checks = std::pin::pin!(checks);
     while let Some(result) = checks.next().await {
-        let (occurrences, verdict) = result?;
+        let (url, occurrences, verdict) = result?;
         checked += 1;
         progress.checks_done(checked);
+        progress.checked(&url, verdict.as_ref());
         if let Some(verdict) = verdict {
             findings.extend(occurrences.into_iter().map(|link| Finding {
                 url: link.url,

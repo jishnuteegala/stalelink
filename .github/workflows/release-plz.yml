@@ -1,0 +1,66 @@
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    # Only PR creation is concurrency-limited; a queued `release` run must
+    # never be canceled or a merged release PR would silently not publish.
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+        with:
+          command: release-pr
+          version: 0.3.160
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: release-pr
+    # `release` is a no-op except when the merged release PR is present.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+        id: release-plz
+        with:
+          command: release
+          version: 0.3.160
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Tags created with GITHUB_TOKEN never fire push-triggered workflows
+      # (recursive-trigger protection), so dispatch cargo-dist explicitly using
+      # the tag release-plz reports rather than inferring it from git state.
+      - name: Start cargo-dist for the release tag
+        if: steps.release-plz.outputs.releases_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          # Only the stalelink package mints the v{version} product tag; core
+          # releases first in dependency order and its tag is disabled.
+          tag="$(jq -r 'map(select(.package_name == "stalelink"))[0].tag // empty' <<< "$RELEASES")"
+          if [ -z "$tag" ]; then
+            echo "no stalelink release tag reported" >&2
+            exit 1
+          fi
+          gh workflow run release.yml --ref "$tag" -f tag="$tag"

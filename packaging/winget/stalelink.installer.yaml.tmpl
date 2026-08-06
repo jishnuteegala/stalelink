@@ -1,0 +1,22 @@
+# Activated after the first public GitHub release.
+PackageIdentifier: JishnuTeegala.Stalelink
+PackageVersion: {{ version }}
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    InstallerUrl: {{ windows_x64_url }}
+    InstallerSha256: {{ windows_x64_sha256 }}
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: stalelink.exe
+        PortableCommandAlias: stalelink
+  - Architecture: arm64
+    InstallerType: zip
+    InstallerUrl: {{ windows_arm64_url }}
+    InstallerSha256: {{ windows_arm64_sha256 }}
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: stalelink.exe
+        PortableCommandAlias: stalelink
+ManifestType: installer
+ManifestVersion: 1.6.0

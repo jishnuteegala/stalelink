@@ -1,74 +1,108 @@
 # stalelink
 
-Scan documents for dead and outdated links.
+[![CI](https://github.com/jishnuteegala/stalelink/actions/workflows/ci.yml/badge.svg)](https://github.com/jishnuteegala/stalelink/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/stalelink.svg)](https://crates.io/crates/stalelink)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-`stalelink` walks your PDFs, Word/Excel/PowerPoint files, Markdown, HTML, and plain text, extracts every link, and tells you which ones are dead, redirected, login-walled, or stale - including links behind authentication, checked with your own browser's logged-in state so they are never falsely reported dead.
+Your documents still link to pages that have disappeared, moved, require a login, or quietly became obsolete. `stalelink` checks local PDF, Word, Excel, PowerPoint, Markdown, HTML, and text files and reports broken links before they become support tickets or a failed audit.
 
-Fully local and open source: no telemetry. Network requests are made only for requested link checks; their verdicts are cached locally unless you use `--no-cache`.
+It is fully local: there is no telemetry. It makes network requests only to check links you asked it to scan, and caches verdicts locally unless you choose `--no-cache`.
 
-> Status: pre-release - under active development. The feature set below describes what is being built; the first tagged release ships the complete local feature set.
+## Install
 
-## Planned surface
+The first tagged release will activate the package-manager channels below. Until then, build from this checkout with stable Rust.
 
-- **Formats:** PDF, DOCX, XLSX, PPTX, Markdown, HTML, plain text
-- **Checks:** HTTP status, soft-404s, redirect chains, login walls, staleness signals (deprecated banners, versioned-URL drift), local file paths, intra-document anchors, cross-document relative links
-- **Auth tiers:** plain HTTP -> browser-profile cookies -> real browser (CDP) for suspect links (Chrome, Edge, Brave, Chromium; Firefox supports tier 2 and CDP attach only)
-- **Output:** human table, `--json`, SARIF; confidence levels (dead-certain, likely-dead, auth-walled, outdated, suspect); suggested replacement URLs; CI-friendly exit codes
-- **Auto-fix:** `stalelink fix` previews link rewrites as a diff; `--write` applies them, across every supported format
-- **Performance:** parallel parsing, URL dedupe, response caching, polite per-host rate limits
+| Channel | Command |
+| --- | --- |
+| Cargo | `cargo install stalelink` (coming with first release) |
+| npm | `npm install -g stalelink` (coming with first release) |
+| Shell | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.sh | sh` (coming with first release) |
+| PowerShell | `irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.ps1 | iex` (coming with first release) |
+| Source | `cargo install --path crates/stalelink` |
 
-## Local links
+## Scan Links
 
-Explicit Markdown destinations (including resolved reference links), HTML `href`/`src` attributes, and external PDF/OOXML targets may point to local files. Relative paths resolve from the containing document; absolute/root-relative paths resolve from the filesystem root. Query strings are ignored for filesystem lookup. Percent escapes in paths and fragments are decoded strictly before any filesystem lookup or anchor comparison; malformed escapes or invalid UTF-8 are syntax-invalid. Markdown headings use rendered text, lowercase slugs that retain Unicode letters and numbers plus hyphens and underscores, remove other characters, convert each whitespace character to a hyphen, and reserve GitHub-style document-wide duplicate suffixes (`-1`, `-2`). Markdown and HTML also recognize `id` on any element and `name` on `<a>` elements. Existing directories are valid fragmentless targets; links with directory fragments report that their anchors cannot be checked. Anchors in other existing formats are not inspected.
+```console
+$ stalelink scan docs/
+$ stalelink scan --format json docs/ > report.json
+$ stalelink scan --format sarif docs/ -o stalelink.sarif
+```
 
-`mailto:` requires a simple `local@domain.tld` shape. `tel:` requires at least one digit and permits only digits, `+`, `-`, parentheses, and spaces. Use `--no-local` or `[ignore] local-links = true` to skip all local, mailto, and tel checks.
+The default table, JSON, and SARIF outputs contain only findings on stdout. Diagnostics, progress, cookie notices, and repeatable `-v` traces go to stderr. `--quiet` suppresses progress and traces. `--color auto|always|never` controls colored fix diffs; `auto` is disabled for non-terminals and honors `NO_COLOR`.
 
-## Configuration and cache
+Common errors are actionable:
 
-`stalelink` discovers the nearest `stalelink.toml` by walking upward from the first scan input. Positional paths come first; paths read through `--stdin` are appended, so an stdin-only scan uses its first non-empty line. Multi-path scans deliberately use the first path's configuration. `cache clear` and `cache stats` discover configuration upward from the current directory.
+- `error: path does not exist`: pass an existing file or directory.
+- `error: invalid --exclude-url regex`: correct the regular expression.
+- `warning: ... cookie store is unavailable`: choose another supported browser, run from an elevated Windows prompt for app-bound Chrome cookies, or use `--auth off`.
+- `warning: browser tier is unavailable`: install a `live-browser` build or use `--auth cookies`.
 
-Settings use `flags > environment > stalelink.toml > defaults` precedence. Environment names map explicitly to every supported setting: `STALELINK_NETWORK_MAX_CONCURRENCY`, `STALELINK_NETWORK_PER_HOST`, `STALELINK_NETWORK_TIMEOUT`, `STALELINK_NETWORK_RETRIES`, `STALELINK_NETWORK_USER_AGENT`, `STALELINK_CACHE_TTL`, `STALELINK_CACHE_DIR`, `STALELINK_AUTH_AUTH`, `STALELINK_AUTH_BROWSER`, `STALELINK_IGNORE_LOCAL_LINKS`, `STALELINK_IGNORE_EXCLUDE`, `STALELINK_IGNORE_EXCLUDE_URL`, `STALELINK_IGNORE_EXCLUDE_DOMAIN`, `STALELINK_FIX_WRITE`, `STALELINK_FIX_BACKUP`, `STALELINK_FIX_COPY`, and `STALELINK_OUTPUT_FAIL_ON`. Vector values use comma-separated strings, for example `STALELINK_IGNORE_EXCLUDE=generated/**,vendor/**`.
+`--auth off` uses only HTTP. The default cookie tier reads the selected browser cookie store only when an authentication-wall check escalates. `--auth browser` enables the opt-in real-browser tier when built with `live-browser`; it uses a dedicated profile or `--cdp-url`, never the default live profile.
+
+## Fix Links
+
+```console
+$ stalelink fix handbook/                 # preview a unified diff
+$ stalelink fix handbook/ --write --backup
+$ stalelink fix handbook/ --copy
+```
+
+`fix` handles Markdown, text, HTML, DOCX, XLSX, PPTX, and PDF annotation links. It previews changes by default, verifies rewritten files by parsing them again, restores originals after verification failures, and refuses encrypted or signed PDFs. Use `--min-fix-confidence outdated` to include redirect suggestions.
+
+## Configuration And Cache
+
+`stalelink.toml` is found by walking upward from the first input path. Values resolve in this order: CLI flags, `STALELINK_*` environment variables, `stalelink.toml`, defaults.
 
 ```toml
 [network]
-max-concurrency = 128 # per-host = 4, timeout = "20s", retries = 2, user-agent = optional string
+max-concurrency = 128
+per-host = 4
+timeout = "20s"
 
 [cache]
 ttl = "24h"
-dir = ".stalelink-cache" # optional; stores verdicts.sqlite3 here
 
 [ignore]
-local-links = false
 exclude = ["generated/**"]
-exclude-url = ["https://example.test/noisy/.*"]
-exclude-domain = ["example.test"]
 
 [output]
 fail-on = "suspect"
 ```
 
-TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`; CLI `--timeout` is seconds, while `--cache-ttl` uses humantime. `[auth] auth` accepts `off`, `cookies`, or `browser`; `[auth] browser` accepts `auto`, `chrome`, `edge`, `brave`, `chromium`, or `firefox`. `cookies` snapshots the selected browser store once per run and only attaches cookies after an auth-wall trigger. `browser` enables a bounded third escalation tier (25 links per run); it is opt-in and uses a dedicated profile, or `--cdp-url` to attach to a chosen debugging endpoint. Firefox cookie extraction (tier 2) is fully supported, but Firefox does not provide the CDP required to launch tier 3; use a Chromium browser or attach `--cdp-url` to any CDP endpoint. Explicit `--auth cookies` exits 3 when no readable cookie store is available.
+The SQLite cache defaults to the platform cache directory. Use `stalelink cache stats`, `stalelink cache clear`, `--refresh`, or `--no-cache` to control it.
 
-The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to purge the local cache.
+## Exit Codes
 
-## Report formats
+| Code | Meaning |
+| --- | --- |
+| 0 | Clean scan, successful cache command, or successful fix dry run/write |
+| 1 | A finding meets `--fail-on`, or a fix was refused/failed |
+| 2 | Invalid arguments or configuration |
+| 3 | Environment or IO setup failure |
 
-`stalelink scan` prints a human table by default. Use `--format json` (or `--json`) for the versioned machine-readable report, or `--format sarif` for SARIF 2.1.0. `-o <file>` writes any format to a file and leaves stdout empty. Diagnostics always go to stderr.
+## Shell Completions
 
-The JSON report has a top-level `schema_version` (currently `1`), `run`, and `findings` envelope. Version 1 is validated by the shipped [`schema/stalelink-report.v1.json`](schema/stalelink-report.v1.json). The v1 schema is strict: every object rejects unknown properties, so additions require a new schema version rather than silently changing the contract. `run.files_scanned`, `links_checked`, and `links_unique` are pre-filter scan totals; `findings_by_confidence` counts the rendered findings after `--min-confidence` filtering. `duration_ms` covers the completed scan. Cache hit/miss counters are deliberately omitted because the current cache checker seam does not expose per-run counters.
+```console
+stalelink completions bash > ~/.local/share/bash-completion/completions/stalelink
+stalelink completions zsh > ~/.zfunc/_stalelink
+stalelink completions fish > ~/.config/fish/completions/stalelink.fish
+stalelink completions powershell >> $PROFILE
+```
 
-SARIF rule IDs are stable: `SL0001` HTTP status, `SL0002` network error, `SL0003` soft-404, `SL0101` login wall, `SL0201` permanent redirect, `SL0202` staleness banner, `SL0203` version drift, `SL0204` far-past last-modified, `SL0301` anomalous response, `SL0401` missing local target, and `SL0402` invalid syntax. Dead-certain findings are SARIF errors, likely-dead and outdated findings warnings, and auth-walled and suspect findings notes. Text findings include line/column regions; binary-document location data remains in result properties. Completed runs include `invocations[0]` with `executionSuccessful` and the process exit code, without recording the command line or working directory.
+## Agent Usage
 
-## Fixing text links
+Agents can use JSON for a stable machine-readable envelope, SARIF for code-scanning integrations, and exit codes to decide whether a change is acceptable:
 
-`stalelink fix <paths>` runs the same scan as `scan` and considers automatic suggested fixes for Markdown, plain text, HTML, DOCX, XLSX, PPTX, and annotation links in PDFs. It prints unified diffs for text files and `<file>: <old-url> -> <replacement-url>` summaries for binary files by default; dry runs never modify a file and exit 0 when all fixes are eligible.
+```console
+stalelink scan --format json --fail-on likely-dead docs/ > stalelink-report.json
+```
 
-Use `--write` to replace links in place. The replacement is written to a temporary file in the document's directory and renamed into place, then stalelink extracts the resulting document again to confirm every replacement URL is present and every old URL is absent. Failed verification restores the original bytes and exits 1. On Windows, replacing an existing destination requires a remove-then-rename step; the original bytes remain in memory until verification completes so they can be restored if replacement or verification fails.
+The JSON schema is [`schema/stalelink-report.v1.json`](schema/stalelink-report.v1.json). It has a strict `schema_version` of `1`; consumers should reject unknown versions rather than infer new fields.
 
-`--backup` requires `--write` and retains the original at `<file>.bak` (for example, `note.txt.bak`). `--copy` instead creates `<stem>.fixed.<ext>` without modifying the original and conflicts with `--write`; it refuses to overwrite an existing copy. `--min-fix-confidence` defaults to `dead-certain`; redirects are normally `outdated`, so use `--min-fix-confidence outdated` to apply redirect suggestions. Repeat `--fix-exclude redirect` to omit redirect targets or `--fix-exclude url-upgrade` to omit HTTPS and version upgrades.
+## Release Channels
 
-OOXML fixes byte-splice only matching URLs in XML relationship/document parts. Untouched ZIP entries are raw-copied when they have no ZIP extra metadata; archives with untouched entries carrying extra fields are refused because the ZIP writer cannot guarantee those fields survive reconstruction. PDF annotation changes are append-only incremental updates. PDF bare-text URLs require manual editing, and encrypted or signed PDFs are refused during `fix` preflight even when extraction found no links, so stalelink never invalidates encryption or signatures. `--fix-exclude pdf` excludes only PDF fixes and PDF preflight. Exit code 0 means a dry run completed or all requested fixes completed, 1 means a fix was refused or verification failed, 2 means invalid arguments/configuration, and 3 means an environment or IO setup failure.
+The repository is configured for draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, including checksums, shell/PowerShell installers, and cargo-dist's generated `stalelink` npm installer. `release-plz` maintains the human-reviewed release PR. Only after a maintainer merges that PR does `release-plz` publish `stalelink-core` then `stalelink` to crates.io and create the version tag. It then dispatches cargo-dist for that tag; cargo-dist alone creates the GitHub Release as a draft and uploads its artifacts. The repository owner must configure the `CARGO_REGISTRY_TOKEN` Actions secret before the first crates.io release, and `NPM_TOKEN` before the generated npm installer can publish. A maintainer publishes the draft only after reviewing its artifacts. Homebrew, Scoop, WinGet, nFPM, and AUR files under `packaging/` are unimplemented manual examples, not release channels.
 
 ## License
 
-MIT - see [LICENSE](LICENSE)
+MIT. See [LICENSE](LICENSE).

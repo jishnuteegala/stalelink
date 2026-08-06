@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core scanning, checking, reporting, and fixing library for stalelink"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 chrono.workspace = true
