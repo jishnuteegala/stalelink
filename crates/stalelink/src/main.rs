@@ -23,6 +23,7 @@ use stalelink_core::{
     scan::{NoProgress, Progress, ScanInput, scan},
     walk::WalkOptions,
 };
+use tempfile::NamedTempFile;
 
 const CLEAN: u8 = 0;
 const USAGE: u8 = 2;
@@ -68,6 +69,8 @@ enum Command {
 struct ScanArgs {
     #[command(flatten)]
     common: CommonArgs,
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -93,8 +96,6 @@ struct FixArgs {
 
 #[derive(Debug, Clone, Args)]
 struct CommonArgs {
-    #[command(flatten)]
-    output: OutputArgs,
     /// Files and/or directories to scan (recursive, format auto-detect)
     #[arg(value_name = "PATHS", required_unless_present = "stdin")]
     paths: Vec<PathBuf>,
@@ -303,7 +304,7 @@ fn run(cli: Cli) -> ExitCode {
 }
 
 fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
-    let (mut report, fail_on) = match scan_common(&args.common, quiet) {
+    let (mut report, fail_on) = match scan_common(&args.common, Some(&args.output), quiet) {
         Ok(report) => report,
         Err(exit_code) => return ExitCode::from(exit_code),
     };
@@ -311,17 +312,17 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
         .findings
         .iter()
         .any(|finding| finding.verdict.confidence >= fail_on);
-    let minimum = Confidence::from(args.common.output.min_confidence);
+    let minimum = Confidence::from(args.output.min_confidence);
     report
         .findings
         .retain(|finding| finding.verdict.confidence >= minimum);
-    let format = if args.common.output.json {
+    let format = if args.output.json {
         OutputFormat::Json
     } else {
-        args.common.output.format
+        args.output.format
     };
     let exit_code = if failed { 1 } else { CLEAN };
-    let result = if let Some(path) = args.common.output.output {
+    let result = if let Some(path) = args.output.output {
         File::create(path).and_then(|file| write_report(file, format, &report, exit_code))
     } else {
         write_report(io::stdout(), format, &report, exit_code)
@@ -335,6 +336,7 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
 
 fn scan_common(
     args: &CommonArgs,
+    output: Option<&OutputArgs>,
     quiet: bool,
 ) -> Result<(stalelink_core::scan::ScanReport, Confidence), u8> {
     let mut paths = args.paths.clone();
@@ -389,7 +391,7 @@ fn scan_common(
     if args.no_local {
         settings.ignore.local_links = true;
     }
-    let fail_on = match args.output.fail_on {
+    let fail_on = match output.and_then(|output| output.fail_on) {
         Some(value) => value,
         None => match settings.output.fail_on.parse::<ConfidenceLevel>() {
             Ok(value) => value,
@@ -513,7 +515,7 @@ fn scan_common(
 }
 
 fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
-    let report = match scan_common(&args.common, quiet) {
+    let report = match scan_common(&args.common, None, quiet) {
         Ok((report, _)) => report,
         Err(exit_code) => return ExitCode::from(exit_code),
     };
@@ -654,20 +656,34 @@ fn write_in_place(
         )
         .map_err(|error| format!("writing backup: {error}"))?;
     }
-    let temporary = path.with_file_name(format!(
-        ".{}.stalelink.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    fs::write(&temporary, fixed).map_err(|error| format!("writing temporary file: {error}"))?;
-    // Windows rename cannot replace an existing destination. Removing first is a
-    // short non-atomic gap, but the original bytes remain in memory for restore.
+    let metadata = fs::metadata(path).map_err(|error| format!("reading metadata: {error}"))?;
+    let original_permissions = metadata.permissions();
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary = NamedTempFile::new_in(directory)
+        .map_err(|error| format!("creating temporary file: {error}"))?;
+    temporary
+        .write_all(fixed)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("writing temporary file: {error}"))?;
+    temporary
+        .as_file()
+        .set_permissions(original_permissions.clone())
+        .map_err(|error| format!("preserving permissions: {error}"))?;
     #[cfg(windows)]
-    fs::remove_file(path).map_err(|error| format!("replacing original: {error}"))?;
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        let _ = fs::write(path, original);
-        return Err(format!("replacing original: {error}"));
+    {
+        // MoveFileEx cannot replace a read-only destination. The replacement
+        // already carries the original attribute and restores it atomically.
+        let mut writable = original_permissions.clone();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        fs::set_permissions(path, writable)
+            .map_err(|error| format!("making original replaceable: {error}"))?;
     }
+    temporary.persist(path).map_err(|error| {
+        #[cfg(windows)]
+        let _ = fs::set_permissions(path, original_permissions);
+        format!("replacing original: {}", error.error)
+    })?;
     let result = fs::read(path)
         .map_err(|error| format!("reading written file: {error}"))
         .and_then(|written| verify(&written));
@@ -801,5 +817,24 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "failed verification");
         assert_eq!(fs::read(path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn in_place_write_preserves_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("readonly.txt");
+        fs::write(&path, b"original").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        write_in_place(&path, b"original", b"fixed", false, |_| Ok(())).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"fixed");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
     }
 }

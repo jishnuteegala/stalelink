@@ -65,6 +65,28 @@ fn backup_conflicts_with_copy() {
 }
 
 #[test]
+fn fix_rejects_scan_output_flags() {
+    for flag in [
+        "--format",
+        "--json",
+        "--output",
+        "--min-confidence",
+        "--fail-on",
+    ] {
+        let mut command = util::command();
+        let mut args = vec!["fix", flag];
+        if matches!(
+            flag,
+            "--format" | "--output" | "--min-confidence" | "--fail-on"
+        ) {
+            args.push("json");
+        }
+        args.push("x.md");
+        command.args(args).assert().code(2);
+    }
+}
+
+#[test]
 fn clean_scan_exits_zero_with_no_stdout() {
     let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
     let mut command = util::command();

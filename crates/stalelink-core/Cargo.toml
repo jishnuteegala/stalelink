@@ -24,7 +24,7 @@ httpdate.workspace = true
 lopdf.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
-lol_html.workspace = true
+html-escape.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
