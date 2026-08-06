@@ -16,7 +16,7 @@ use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use regex::Regex;
 use stalelink_core::{
-    check::{AuthCap, EscalatingChecker, HttpChecker},
+    check::HttpChecker,
     extract::{SourceDocument, extract},
     fix::{fixer_for, pdf_refusal},
     model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
@@ -177,8 +177,8 @@ struct AuthArgs {
     #[arg(long, value_enum)]
     auth: Option<Auth>,
     /// Which browser's cookies/profile to use
-    #[arg(long, value_enum, default_value_t = Browser::Auto)]
-    browser: Browser,
+    #[arg(long, value_enum)]
+    browser: Option<Browser>,
     /// Connect tier 3 to this Chromium debugging endpoint instead of launching a profile
     #[arg(long, requires = "auth")]
     cdp_url: Option<String>,
@@ -456,7 +456,15 @@ fn scan_common(
         _ => Auth::Cookies,
     };
     let selected_auth = requested_auth.unwrap_or(configured_auth);
-    let browser = match args.auth.browser {
+    let configured_browser = match settings.auth.browser.as_str() {
+        "chrome" => Browser::Chrome,
+        "edge" => Browser::Edge,
+        "brave" => Browser::Brave,
+        "chromium" => Browser::Chromium,
+        "firefox" => Browser::Firefox,
+        _ => Browser::Auto,
+    };
+    let browser = match args.auth.browser.unwrap_or(configured_browser) {
         Browser::Auto => auth::Browser::Auto,
         Browser::Chrome => auth::Browser::Chrome,
         Browser::Edge => auth::Browser::Edge,
@@ -465,9 +473,9 @@ fn scan_common(
         Browser::Firefox => auth::Browser::Firefox,
     };
     let cap = match selected_auth {
-        Auth::Off => AuthCap::Off,
-        Auth::Cookies => AuthCap::Cookies,
-        Auth::Browser => AuthCap::Browser,
+        Auth::Off => auth::AuthCap::Off,
+        Auth::Cookies => auth::AuthCap::Cookies,
+        Auth::Browser => auth::AuthCap::Browser,
     };
     let snapshot = if matches!(requested_auth, Some(Auth::Cookies)) {
         match auth::snapshot(browser) {
@@ -553,20 +561,30 @@ fn scan_common(
     };
     #[cfg(feature = "live-browser")]
     let tier3 = if matches!(selected_auth, Auth::Browser) {
-        let profile = cache_path.join("browser-profile");
-        match runtime.block_on(auth::CdpPageDriver::launch(
-            &profile,
-            args.auth.cdp_url.as_deref(),
-        )) {
-            Ok(drivers) => Some(auth::BrowserChecker::new(drivers)),
-            Err(error) => {
-                eprintln!(
-                    "warning: browser tier is unavailable ({error}); start Chromium with remote debugging or check its installation"
-                );
-                if matches!(requested_auth, Some(Auth::Browser)) {
-                    return Err(ENVIRONMENT);
+        if matches!(browser, auth::Browser::Firefox) {
+            eprintln!(
+                "warning: Firefox is supported for cookies but not the Chromium CDP tier; use --auth cookies or select a Chromium browser"
+            );
+            if matches!(requested_auth, Some(Auth::Browser)) {
+                return Err(USAGE);
+            }
+            None
+        } else {
+            let profile = cache_path.join("browser-profile");
+            match runtime.block_on(auth::CdpPageDriver::launch(
+                &profile,
+                args.auth.cdp_url.as_deref(),
+            )) {
+                Ok(drivers) => Some(auth::BrowserChecker::new(drivers)),
+                Err(error) => {
+                    eprintln!(
+                        "warning: browser tier is unavailable ({error}); start Chromium with remote debugging or check its installation"
+                    );
+                    if matches!(requested_auth, Some(Auth::Browser)) {
+                        return Err(ENVIRONMENT);
+                    }
+                    None
                 }
-                None
             }
         }
     } else {
@@ -582,9 +600,9 @@ fn scan_common(
         }
     }
     #[cfg(feature = "live-browser")]
-    let checker = EscalatingChecker::new(tier1, tier2, tier3, cap);
+    let checker = auth::AuthChecker::new(tier1, tier2, tier3, cap);
     #[cfg(not(feature = "live-browser"))]
-    let checker = EscalatingChecker::new(tier1, tier2, Option::<auth::CookieChecker>::None, cap);
+    let checker = auth::AuthChecker::new(tier1, tier2, Option::<auth::CookieChecker>::None, cap);
     let show_progress = !quiet && io::stderr().is_terminal();
     let result = if network.no_cache {
         if show_progress {

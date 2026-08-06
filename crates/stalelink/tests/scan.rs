@@ -542,6 +542,100 @@ async fn discovery_uses_first_path_and_stdin_path_before_config_resolution() {
     tokio::task::block_in_place(|| command.assert()).code(1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cookie_redirect_to_login_remains_auth_walled() {
+    let server = MockServer::start().await;
+    Mock::given(path("/private"))
+        .and(wiremock::matchers::header("cookie", "session=granted"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", "/login?returnUrl=%2Fprivate"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(path("/private"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    Mock::given(path("/login"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.md"),
+        format!("{}/private", server.uri()),
+    )
+    .unwrap();
+    let cookies = tempfile::tempdir().unwrap();
+    std::fs::write(
+        cookies.path().join("cookies.json"),
+        r#"[["127.0.0.1", "session", "granted"]]"#,
+    )
+    .unwrap();
+    let mut command = util::command();
+    command
+        .env("STALELINK_COOKIE_STORE_DIR", cookies.path())
+        .args([
+            "scan",
+            "--no-cache",
+            "--retries",
+            "0",
+            directory.path().to_str().unwrap(),
+        ]);
+    tokio::task::block_in_place(|| command.assert())
+        .code(1)
+        .stdout(predicate::str::contains("AUTH-WALLED"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_cookie_failure_preserves_auth_wall_and_warns_once() {
+    let server = serve(&[("/private", 403)]).await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.md"),
+        format!("{}/private", server.uri()),
+    )
+    .unwrap();
+    let missing = directory.path().join("missing-store");
+    let mut command = util::command();
+    command.env("STALELINK_COOKIE_STORE_DIR", &missing).args([
+        "scan",
+        "--no-cache",
+        directory.path().to_str().unwrap(),
+    ]);
+    let output = command.assert().code(1).get_output().clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.matches("cookie store is unavailable").count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_browser_is_used_when_flag_is_absent() {
+    let server = serve(&[("/private", 403)]).await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("note.md"),
+        format!("{}/private", server.uri()),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[auth]\nbrowser = 'firefox'\n",
+    )
+    .unwrap();
+    let missing = directory.path().join("missing-store");
+    let mut command = util::command();
+    command.env("STALELINK_COOKIE_STORE_DIR", &missing).args([
+        "scan",
+        "--no-cache",
+        directory.path().to_str().unwrap(),
+    ]);
+    tokio::task::block_in_place(|| command.assert())
+        .code(1)
+        .stderr(predicate::str::contains(
+            "Firefox cookie store is unavailable",
+        ));
+}
+
 #[test]
 fn cache_clear_removes_the_injected_database() {
     let cache = tempfile::tempdir().unwrap();
