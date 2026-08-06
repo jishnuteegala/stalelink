@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stalelink.dev/schema/stalelink-report.v1.json",
+  "title": "stalelink report v1",
+  "type": "object",
+  "required": ["schema_version", "run", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "run": {
+      "type": "object",
+      "required": ["files_scanned", "links_checked", "links_unique", "findings_by_confidence", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "files_scanned": { "type": "integer", "minimum": 0 },
+        "links_checked": { "type": "integer", "minimum": 0 },
+        "links_unique": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": "integer", "minimum": 0 },
+        "findings_by_confidence": {
+          "type": "object",
+          "required": ["dead_certain", "likely_dead", "auth_walled", "outdated", "suspect"],
+          "additionalProperties": false,
+          "properties": {
+            "dead_certain": { "type": "integer", "minimum": 0 },
+            "likely_dead": { "type": "integer", "minimum": 0 },
+            "auth_walled": { "type": "integer", "minimum": 0 },
+            "outdated": { "type": "integer", "minimum": 0 },
+            "suspect": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "type": "object" } }
+  }
+}

@@ -51,6 +51,14 @@ TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`
 
 The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to purge the local cache.
 
+## Report formats
+
+`stalelink scan` prints a human table by default. Use `--format json` (or `--json`) for the versioned machine-readable report, or `--format sarif` for SARIF 2.1.0. `-o <file>` writes any format to a file and leaves stdout empty. Diagnostics always go to stderr.
+
+The JSON report has a top-level `schema_version` (currently `1`), `run`, and `findings` envelope. Version 1 is validated by the shipped [`schema/stalelink-report.v1.json`](schema/stalelink-report.v1.json). Compatible additions may be made within a schema version; incompatible changes require a new version. `run` contains files scanned, checked/unique link counts, findings grouped by confidence, and elapsed milliseconds. Cache hit/miss counters are deliberately omitted because the current cache checker seam does not expose per-run counters.
+
+SARIF rule IDs are stable: `SL0001` HTTP status, `SL0002` network error, `SL0003` soft-404, `SL0101` login wall, `SL0201` permanent redirect, `SL0202` staleness banner, `SL0203` version drift, `SL0204` far-past last-modified, `SL0301` anomalous response, `SL0401` missing local target, and `SL0402` invalid syntax. Dead-certain findings are SARIF errors, likely-dead and outdated findings warnings, and auth-walled and suspect findings notes. Text findings include line/column regions; binary-document location data remains in result properties.
+
 ## License
 
 MIT - see [LICENSE](LICENSE)
