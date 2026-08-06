@@ -663,7 +663,7 @@ fn link_from_field(text: &str) -> Option<&str> {
     let start = rest.find("http")?;
     let url = &rest[start..];
     let end = url
-        .find(|character: char| character.is_whitespace() || matches!(character, '"' | ')' | '&'))
+        .find(|character: char| character.is_whitespace() || matches!(character, '"' | ')'))
         .unwrap_or(url.len());
     let url = &url[..end];
     is_http(url).then_some(url)
@@ -893,6 +893,7 @@ fn extract_xlsx(
         let mut reader = NsReader::from_str(&xml);
         let mut cell = String::new();
         let mut formula = false;
+        let mut formula_text = String::new();
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Start(event))) => {
@@ -902,6 +903,7 @@ fn extract_xlsx(
                     }
                     if resolved_name(&resolved, &event, SPREADSHEET_NS, b"f") {
                         formula = true;
+                        formula_text.clear();
                     }
                     if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink")
                         && let (Some(reference), Some(id)) = (
@@ -944,7 +946,19 @@ fn extract_xlsx(
                         .xml_content()
                         .map_err(|error| ExtractError(error.to_string()))?
                         .replace("&quot;", "\"");
-                    if let Some(url) = link_from_field(&text) {
+                    formula_text.push_str(&text);
+                }
+                Ok((_, XmlEvent::GeneralRef(event))) if formula => {
+                    let reference = event
+                        .decode()
+                        .map_err(|error| ExtractError(error.to_string()))?;
+                    formula_text.push_str(if reference == "quot" { "\"" } else { "&" });
+                }
+                Ok((resolved, XmlEvent::End(event)))
+                    if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
+                        && event.local_name().as_ref() == b"f" =>
+                {
+                    if let Some(url) = link_from_field(&formula_text) {
                         links.push(binary_link(
                             doc,
                             url,
@@ -954,11 +968,6 @@ fn extract_xlsx(
                             },
                         ));
                     }
-                }
-                Ok((resolved, XmlEvent::End(event)))
-                    if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
-                        && event.local_name().as_ref() == b"f" =>
-                {
                     formula = false;
                 }
                 Ok((_, XmlEvent::Eof)) => break,

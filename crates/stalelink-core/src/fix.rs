@@ -248,15 +248,9 @@ fn replace_urls(
     changed: &mut [bool],
 ) -> Vec<u8> {
     let mut edits = Vec::new();
-    for (range, value, field_code) in xml_values(name, bytes) {
+    for values in xml_value_groups(name, bytes) {
         for (index, (old, replacement)) in replacements.iter().enumerate() {
-            if (name.ends_with(".rels") || field_code)
-                && let Some(range) = xml_subrange(bytes, &range, &value, old)
-            {
-                edits.push(Edit {
-                    span: range,
-                    replacement: xml_escape(replacement).into_bytes(),
-                });
+            if add_url_edits(bytes, &values, old, replacement, &mut edits) {
                 changed[index] = true;
             }
         }
@@ -273,9 +267,49 @@ fn xml_escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn xml_values(name: &str, bytes: &[u8]) -> Vec<(Range<usize>, String, bool)> {
+fn add_url_edits(
+    bytes: &[u8],
+    values: &[(Range<usize>, String)],
+    old: &str,
+    replacement: &str,
+    edits: &mut Vec<Edit>,
+) -> bool {
+    let combined = values
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect::<String>();
+    let Some(start) = combined.find(old) else {
+        return false;
+    };
+    let mut offset = 0;
+    let mut wrote_replacement = false;
+    for (range, value) in values {
+        let value_end = offset + value.len();
+        let overlap_start = start.max(offset);
+        let overlap_end = (start + old.len()).min(value_end);
+        if overlap_start < overlap_end {
+            let portion = &value[overlap_start - offset..overlap_end - offset];
+            let Some(span) = xml_subrange(bytes, range, value, portion) else {
+                return false;
+            };
+            edits.push(Edit {
+                span,
+                replacement: if wrote_replacement {
+                    Vec::new()
+                } else {
+                    wrote_replacement = true;
+                    xml_escape(replacement).into_bytes()
+                },
+            });
+        }
+        offset = value_end;
+    }
+    wrote_replacement
+}
+
+fn xml_value_groups(name: &str, bytes: &[u8]) -> Vec<Vec<(Range<usize>, String)>> {
     let text = String::from_utf8_lossy(bytes);
-    let mut values = Vec::new();
+    let mut groups = Vec::new();
     if name.ends_with(".rels") {
         let mut position = 0;
         while let Some(offset) = text[position..].find("Target=") {
@@ -292,13 +326,14 @@ fn xml_values(name: &str, bytes: &[u8]) -> Vec<(Range<usize>, String, bool)> {
                 break;
             };
             let end = start + end;
-            values.push((start..end, xml_unescape(&text[start..end]), false));
+            groups.push(vec![(start..end, xml_unescape(&text[start..end]))]);
             position = end + 1;
         }
-        return values;
+        return groups;
     }
 
     let mut position = 0;
+    let mut instructions = Vec::new();
     while let Some(tag_offset) = text[position..].find('<') {
         let tag_start = position + tag_offset;
         let Some(tag_end) = text[tag_start..].find('>') else {
@@ -306,27 +341,35 @@ fn xml_values(name: &str, bytes: &[u8]) -> Vec<(Range<usize>, String, bool)> {
         };
         let tag_end = tag_start + tag_end;
         let tag = &text[tag_start..=tag_end];
-        let instruction = tag.contains("instrText") || tag.contains("fldSimple");
-        if instruction {
-            if tag.contains("fldSimple") {
-                if let Some((range, value)) = attribute_value(bytes, tag_start, tag_end, b"instr") {
-                    values.push((range, value, true));
-                }
-            } else if !tag.starts_with("</") {
-                let content_start = tag_end + 1;
-                if let Some(close) = text[content_start..].find("</") {
-                    let content_end = content_start + close;
-                    values.push((
-                        content_start..content_end,
-                        xml_unescape(&text[content_start..content_end]),
-                        true,
-                    ));
-                }
+        if tag.contains("fldSimple") {
+            if let Some((range, value)) = attribute_value(bytes, tag_start, tag_end, b"instr") {
+                groups.push(vec![(range, value)]);
+            }
+        } else if tag.contains("instrText") && !tag.starts_with("</") {
+            let content_start = tag_end + 1;
+            if let Some(close) = text[content_start..].find("</") {
+                let content_end = content_start + close;
+                instructions.push((
+                    content_start..content_end,
+                    xml_unescape(&text[content_start..content_end]),
+                ));
+            }
+        } else if (tag.contains(":f") || tag.starts_with("<f")) && !tag.starts_with("</") {
+            let content_start = tag_end + 1;
+            if let Some(close) = text[content_start..].find("</") {
+                let content_end = content_start + close;
+                groups.push(vec![(
+                    content_start..content_end,
+                    xml_unescape(&text[content_start..content_end]),
+                )]);
             }
         }
         position = tag_end + 1;
     }
-    values
+    if !instructions.is_empty() {
+        groups.push(instructions);
+    }
+    groups
 }
 
 fn attribute_value(
@@ -1118,6 +1161,99 @@ mod tests {
     }
 
     #[test]
+    fn ooxml_round_trips_extracted_escaped_relationship_and_word_fields() {
+        let replacement = "https://new.test/y?a=3&b=4";
+        let original = archive(&[
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships><Relationship Id="r" TargetMode="External" Target="https://old.test/x?a=1&amp;b=2"/></Relationships>"#,
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="r"/><w:fldSimple w:instr="HYPERLINK &quot;https://old.test/x?a=1&amp;b=2&quot;"/><w:fldChar w:fldCharType="begin"/><w:instrText>HYPERLINK &quot;https://old.</w:instrText><w:instrText>test/x?a=1&amp;b=2&quot;</w:instrText><w:fldChar w:fldCharType="end"/></w:p></w:body></w:document>"#,
+            ),
+        ]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Docx,
+            bytes: original.clone(),
+        };
+        let findings = extract(&document)
+            .unwrap()
+            .into_iter()
+            .map(|link| {
+                binary_finding(
+                    DocFormat::Docx,
+                    &link.url,
+                    replacement,
+                    link.source.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 3);
+        let fixed = OoxmlFixer.fix(&original, &findings).unwrap();
+        let links = extract(&SourceDocument {
+            bytes: fixed.clone(),
+            ..document
+        })
+        .unwrap();
+        assert_eq!(links.len(), 3);
+        assert!(links.iter().all(|link| link.url == replacement));
+        let mut archive = zip::ZipArchive::new(Cursor::new(fixed)).unwrap();
+        let mut xml = String::new();
+        archive
+            .by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        assert!(xml.contains("https://new.test/y?a=3&amp;b=4"));
+    }
+
+    #[test]
+    fn ooxml_round_trips_extracted_escaped_xlsx_formula() {
+        let replacement = "https://new.test/y?a=3&b=4";
+        let original = archive(&[
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" r:id="r"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships><Relationship Id="r" Target="worksheets/s.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/s.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1"><f>HYPERLINK(&quot;https://old.test/x?a=1&amp;b=2&quot;)</f></c></row></sheetData></worksheet>"#,
+            ),
+        ]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Xlsx,
+            bytes: original.clone(),
+        };
+        let findings = extract(&document)
+            .unwrap()
+            .into_iter()
+            .map(|link| {
+                binary_finding(
+                    DocFormat::Xlsx,
+                    &link.url,
+                    replacement,
+                    link.source.location,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 1);
+        let fixed = OoxmlFixer.fix(&original, &findings).unwrap();
+        let links = extract(&SourceDocument {
+            bytes: fixed,
+            ..document
+        })
+        .unwrap();
+        assert_eq!(links[0].url, replacement);
+    }
+
+    #[test]
     fn ooxml_deduplicates_identical_findings_and_rejects_conflicts() {
         let original = archive(&[(
             "word/_rels/document.xml.rels",
@@ -1281,5 +1417,38 @@ mod tests {
             .unwrap()
             .set("AcroForm", lopdf::Object::Reference((8, 0)));
         assert!(!signed_pdf(&document));
+    }
+
+    #[test]
+    fn pdf_detects_direct_and_indirect_acroform_signature_fields() {
+        for field in [
+            lopdf::Object::Dictionary(
+                lopdf::dictionary! { "FT" => lopdf::Object::Name(b"Sig".to_vec()) },
+            ),
+            lopdf::Object::Dictionary(
+                lopdf::dictionary! { "Kids" => lopdf::Object::Array(vec![lopdf::Object::Reference((9, 0))]) },
+            ),
+        ] {
+            let mut document = lopdf::Document::load_mem(&pdf()).unwrap();
+            document.objects.insert(
+                (8, 0),
+                lopdf::Object::Dictionary(
+                    lopdf::dictionary! { "Fields" => lopdf::Object::Array(vec![field]) },
+                ),
+            );
+            document.objects.insert(
+                (9, 0),
+                lopdf::Object::Dictionary(
+                    lopdf::dictionary! { "FT" => lopdf::Object::Name(b"Sig".to_vec()) },
+                ),
+            );
+            document
+                .get_object_mut((1, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("AcroForm", lopdf::Object::Reference((8, 0)));
+            assert!(signed_pdf(&document));
+        }
     }
 }

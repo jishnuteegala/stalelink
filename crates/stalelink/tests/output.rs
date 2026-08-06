@@ -205,6 +205,7 @@ fn schema_validates_every_core_finding_variant_and_optional_form() {
         .collect::<Vec<_>>();
     let report = ScanReport {
         findings,
+        resolved_paths: vec![],
         files_scanned: 9,
         links_checked: 11,
         links_unique: 10,

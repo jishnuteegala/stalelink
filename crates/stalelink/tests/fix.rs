@@ -27,21 +27,21 @@ fn ooxml(format: &str, old: &str) -> Vec<u8> {
     );
     let entries = match format {
         "docx" => vec![
+            ("word/media/keep.bin", "untouched compressed payload".into()),
             ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="rId1"><w:r><w:t>link</w:t></w:r></w:hyperlink></w:p></w:body></w:document>"#.into()),
             ("word/_rels/document.xml.rels", rel),
-            ("word/media/keep.bin", "untouched compressed payload".into()),
         ],
         "xlsx" => vec![
+            ("xl/media/keep.bin", "untouched compressed payload".into()),
             ("xl/workbook.xml", r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#.into()),
             ("xl/_rels/workbook.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#.into()),
             ("xl/worksheets/sheet1.xml", r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><hyperlinks><hyperlink ref="A1" r:id="rId1"/></hyperlinks></worksheet>"#.into()),
             ("xl/worksheets/_rels/sheet1.xml.rels", rel),
-            ("xl/media/keep.bin", "untouched compressed payload".into()),
         ],
         "pptx" => vec![
+            ("ppt/media/keep.bin", "untouched compressed payload".into()),
             ("ppt/slides/slide1.xml", r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:rPr><a:hlinkClick r:id="rId1"/></a:rPr></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#.into()),
             ("ppt/slides/_rels/slide1.xml.rels", rel),
-            ("ppt/media/keep.bin", "untouched compressed payload".into()),
         ],
         _ => unreachable!(),
     };
@@ -94,6 +94,32 @@ fn raw_entry(bytes: &[u8], name: &str) -> Vec<u8> {
     let entry = archive.by_name(name).unwrap();
     bytes[entry.data_start() as usize..(entry.data_start() + entry.compressed_size()) as usize]
         .to_vec()
+}
+
+fn raw_local_record(bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let entry = archive.by_name(name).unwrap();
+    bytes[entry.header_start() as usize..(entry.data_start() + entry.compressed_size()) as usize]
+        .to_vec()
+}
+
+fn raw_central_record(bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut position = 0;
+    while let Some(offset) = bytes[position..]
+        .windows(4)
+        .position(|bytes| bytes == b"PK\x01\x02")
+    {
+        let start = position + offset;
+        let name_length = u16::from_le_bytes([bytes[start + 28], bytes[start + 29]]) as usize;
+        let extra_length = u16::from_le_bytes([bytes[start + 30], bytes[start + 31]]) as usize;
+        let comment_length = u16::from_le_bytes([bytes[start + 32], bytes[start + 33]]) as usize;
+        let end = start + 46 + name_length + extra_length + comment_length;
+        if &bytes[start + 46..start + 46 + name_length] == name.as_bytes() {
+            return bytes[start..end].to_vec();
+        }
+        position = end;
+    }
+    panic!("central record not found for {name}");
 }
 
 async fn redirect_server() -> MockServer {
@@ -347,6 +373,14 @@ async fn write_fixes_each_ooxml_format_and_raw_copies_untouched_entries() {
             raw_entry(&fixed, untouched),
             "{extension} changed an untouched ZIP member"
         );
+        assert_eq!(
+            raw_local_record(&original, untouched),
+            raw_local_record(&fixed, untouched)
+        );
+        assert_eq!(
+            raw_central_record(&original, untouched),
+            raw_central_record(&fixed, untouched)
+        );
         let before = zip::ZipArchive::new(Cursor::new(original)).unwrap();
         let after = zip::ZipArchive::new(Cursor::new(fixed)).unwrap();
         assert_eq!(before.len(), after.len(), "{extension}");
@@ -516,6 +550,57 @@ async fn encrypted_pdf_without_plaintext_url_is_refused_by_preflight() {
             "encrypted PDF files are not modified",
         ));
     assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preflight_uses_stdin_and_config_resolved_pdf_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let encrypted = directory.path().join("encrypted.pdf");
+    let bytes = pdf("not-a-url", false, "/Encrypt 7 0 R", "");
+    fs::write(&encrypted, &bytes).unwrap();
+
+    let mut stdin = util::command();
+    stdin
+        .args(["fix", "--no-cache", "--retries", "0", "--stdin", "--write"])
+        .write_stdin(format!("{}\n", encrypted.display()));
+    tokio::task::block_in_place(|| stdin.assert())
+        .code(1)
+        .stderr(predicates::str::contains(
+            "encrypted PDF files are not modified",
+        ));
+
+    fs::write(
+        directory.path().join("stalelink.toml"),
+        "[ignore]\nexclude = [\"encrypted.pdf\"]\n",
+    )
+    .unwrap();
+    fix(directory.path(), &["--write"]).code(0).stderr("");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn signed_pdf_with_a_fixable_annotation_is_refused_once() {
+    let server = redirect_server().await;
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("signed.pdf");
+    fs::write(
+        &file,
+        pdf(
+            &format!("{}{OLD_PATH}", server.uri()),
+            false,
+            "",
+            "/Perms <<>>",
+        ),
+    )
+    .unwrap();
+    let output = fix(&file, &["--write", "--min-fix-confidence", "outdated"])
+        .code(1)
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.matches("signed PDF files are not modified").count(),
+        1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

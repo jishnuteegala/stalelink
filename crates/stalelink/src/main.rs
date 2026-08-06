@@ -21,7 +21,7 @@ use stalelink_core::{
     model::{Confidence, DocFormat, Finding, FixOrigin, Fixability},
     report::{ReportSink, TableSink},
     scan::{NoProgress, Progress, ScanInput, scan},
-    walk::{WalkOptions, detect_format, walk},
+    walk::{WalkOptions, detect_format},
 };
 use tempfile::NamedTempFile;
 
@@ -520,8 +520,8 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
         Err(exit_code) => return ExitCode::from(exit_code),
     };
     let minimum = Confidence::from(args.min_fix_confidence);
+    let (preflight_refused, mut refused) = preflight_pdfs(&args, &report.resolved_paths);
     let mut by_path: BTreeMap<PathBuf, Vec<Finding>> = BTreeMap::new();
-    let mut refused = preflight_pdfs(&args);
     for finding in report.findings {
         let Some(fix) = &finding.fix else { continue };
         if finding.verdict.confidence < minimum
@@ -540,6 +540,9 @@ fn run_fix(args: FixArgs, quiet: bool) -> ExitCode {
                 }
             );
             refused += 1;
+            continue;
+        }
+        if preflight_refused.contains(&finding.source.path) {
             continue;
         }
         by_path
@@ -613,23 +616,18 @@ fn excluded(format: DocFormat, origin: FixOrigin, exclusions: &[FixExclude]) -> 
     })
 }
 
-fn preflight_pdfs(args: &FixArgs) -> usize {
+fn preflight_pdfs(
+    args: &FixArgs,
+    paths: &[PathBuf],
+) -> (std::collections::HashSet<PathBuf>, usize) {
     if args.fix_exclude.contains(&FixExclude::Pdf) {
-        return 0;
-    }
-    let Ok(paths) = walk(
-        &args.common.paths,
-        &WalkOptions {
-            include: args.common.include.clone(),
-            exclude: args.common.exclude.clone(),
-        },
-    ) else {
-        return 0;
+        return (std::collections::HashSet::new(), 0);
     };
     let mut refused = 0;
+    let mut refused_paths = std::collections::HashSet::new();
     for path in paths {
-        let Ok(bytes) = fs::read(&path) else { continue };
-        if detect_format(&path, &bytes) != Some(DocFormat::Pdf) {
+        let Ok(bytes) = fs::read(path) else { continue };
+        if detect_format(path, &bytes) != Some(DocFormat::Pdf) {
             continue;
         }
         let result = lopdf::Document::load_mem(&bytes)
@@ -638,9 +636,10 @@ fn preflight_pdfs(args: &FixArgs) -> usize {
         if let Err(error) = result {
             eprintln!("refused {}: {error}", path.display());
             refused += 1;
+            refused_paths.insert(path.clone());
         }
     }
-    refused
+    (refused_paths, refused)
 }
 
 fn print_binary_summary(path: &Path, findings: &[Finding]) {
