@@ -8,14 +8,14 @@ permissions:
   contents: write
   pull-requests: write
 
-# Never run two release-plz invocations at once; a race could double-tag.
-concurrency:
-  group: release-plz
-  cancel-in-progress: false
-
 jobs:
   release-pr:
     runs-on: ubuntu-latest
+    # Only PR creation is concurrency-limited; a queued `release` run must
+    # never be canceled or a merged release PR would silently not publish.
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -56,5 +56,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASES: ${{ steps.release-plz.outputs.releases }}
         run: |
-          tag="$(jq -r '.[0].tag' <<< "$RELEASES")"
+          # Only the stalelink package mints the v{version} product tag; core
+          # releases first in dependency order and its tag is disabled.
+          tag="$(jq -r 'map(select(.package_name == "stalelink"))[0].tag // empty' <<< "$RELEASES")"
+          if [ -z "$tag" ]; then
+            echo "no stalelink release tag reported" >&2
+            exit 1
+          fi
           gh workflow run release.yml --ref "$tag" -f tag="$tag"
