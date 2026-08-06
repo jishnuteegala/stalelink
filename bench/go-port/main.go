@@ -5,7 +5,6 @@ package main
 import (
 	"archive/zip"
 	"bytes"
-	"compress/zlib"
 	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
@@ -20,7 +19,20 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pdfcpu/pdfcpu/pkg/api"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 	"golang.org/x/net/html"
+)
+
+const (
+	wordNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+	presNS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+	drawNS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+	relNS  = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 )
 
 type record struct {
@@ -37,33 +49,37 @@ type receipt struct {
 	MedianSeconds float64        `json:"median_seconds"`
 	Formats       map[string]int `json:"formats"`
 }
-type xmlRelationship struct {
+type relationship struct {
 	ID     string `xml:"Id,attr"`
 	Type   string `xml:"Type,attr"`
 	Target string `xml:"Target,attr"`
 	Mode   string `xml:"TargetMode,attr"`
 }
-type xmlRelationships struct {
-	Items []xmlRelationship `xml:"Relationship"`
+type relationships struct {
+	Items []relationship `xml:"Relationship"`
 }
 
 func main() {
-	if len(os.Args) < 3 {
-		panic("usage: stalelink-go <extract|throughput> <directory> [warmup passes]")
+	if len(os.Args) < 3 || (os.Args[1] == "throughput" && len(os.Args) < 5) {
+		panic("usage: stalelink-go <extract|throughput> <directory> [warmup-passes timed-passes format]")
 	}
 	warmup, passes := 0, 1
 	if os.Args[1] == "throughput" {
 		fmt.Sscanf(os.Args[3], "%d", &warmup)
 		fmt.Sscanf(os.Args[4], "%d", &passes)
 	}
+	filter := ""
+	if len(os.Args) > 5 {
+		filter = os.Args[5]
+	}
 	for range warmup {
-		all(os.Args[2])
+		all(os.Args[2], filter)
 	}
 	times := make([]float64, 0, passes)
 	var records []record
 	for range passes {
 		start := time.Now()
-		records = all(os.Args[2])
+		records = all(os.Args[2], filter)
 		times = append(times, time.Since(start).Seconds())
 	}
 	sort.Float64s(times)
@@ -73,11 +89,28 @@ func main() {
 	}
 	encoded, _ := json.Marshal(records)
 	sum := sha256.Sum256(encoded)
-	entries, _ := os.ReadDir(os.Args[2])
-	json.NewEncoder(os.Stdout).Encode(receipt{len(entries), len(records), fmt.Sprintf("%x", sum), records, times[len(times)/2], formats})
+	documents := len(records)
+	if filter == "" {
+		entries, _ := os.ReadDir(os.Args[2])
+		documents = len(entries)
+	} else {
+		seen := map[string]bool{}
+		for _, r := range records {
+			seen[r.Doc] = true
+		}
+		documents = len(seen)
+	}
+	json.NewEncoder(os.Stdout).Encode(receipt{documents, len(records), fmt.Sprintf("%x", sum), records, median(times), formats})
 }
 
-func all(dir string) []record {
+func median(values []float64) float64 {
+	n := len(values)
+	if n%2 == 1 {
+		return values[n/2]
+	}
+	return (values[n/2-1] + values[n/2]) / 2
+}
+func all(dir, filter string) []record {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		panic(err)
@@ -85,9 +118,11 @@ func all(dir string) []record {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var out []record
 	for _, e := range entries {
+		if filter != "" && filepath.Ext(e.Name()) != "."+filter {
+			continue
+		}
 		if !e.IsDir() {
-			path := filepath.Join(dir, e.Name())
-			data, err := os.ReadFile(path)
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 			if err != nil {
 				panic(err)
 			}
@@ -101,7 +136,6 @@ func all(dir string) []record {
 	})
 	return out
 }
-
 func valid(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https")
@@ -129,7 +163,6 @@ func addText(doc string, data []byte, raw string, start int, out *[]record) {
 		*out = append(*out, record{doc, raw, textLocation(data, start), &span})
 	}
 }
-
 func extract(doc string, data []byte) []record {
 	switch filepath.Ext(doc) {
 	case ".html":
@@ -138,24 +171,34 @@ func extract(doc string, data []byte) []record {
 		return markdownLinks(doc, data)
 	case ".txt":
 		return bareLinks(doc, data)
-	case ".docx", ".xlsx", ".pptx":
-		return ooxmlLinks(doc, data)
+	case ".docx":
+		return docxLinks(doc, data)
+	case ".xlsx":
+		return xlsxLinks(doc, data)
+	case ".pptx":
+		return pptxLinks(doc, data)
 	case ".pdf":
 		return pdfLinks(doc, data)
 	}
 	return nil
 }
+
+// This recognizes URLs in prose rather than treating whitespace-delimited words as URLs.
 func bareLinks(doc string, data []byte) []record {
 	var out []record
-	cursor := 0
-	for _, word := range strings.Fields(string(data)) {
-		at := bytes.Index(data[cursor:], []byte(word))
-		if at >= 0 {
-			at += cursor
-			cursor = at + len(word)
-			raw := strings.TrimRight(word, ".,;:!?)")
-			addText(doc, data, raw, at, &out)
+	for i := 0; i < len(data); i++ {
+		if !bytes.HasPrefix(data[i:], []byte("http://")) && !bytes.HasPrefix(data[i:], []byte("https://")) {
+			continue
 		}
+		end := i
+		for end < len(data) && !strings.ContainsRune(" \t\r\n<>\"'", rune(data[end])) {
+			end++
+		}
+		for end > i && strings.ContainsRune(".,;:!?)", rune(data[end-1])) {
+			end--
+		}
+		addText(doc, data, string(data[i:end]), i, &out)
+		i = end
 	}
 	return out
 }
@@ -173,19 +216,18 @@ func htmlLinks(doc string, data []byte) []record {
 		}
 		token := z.Token()
 		attr := ""
-		if token.Data == "a" || token.Data == "link" {
+		switch strings.ToLower(token.Data) {
+		case "a", "link":
 			attr = "href"
-		}
-		if token.Data == "img" || token.Data == "script" {
+		case "img", "script":
 			attr = "src"
 		}
 		for _, a := range token.Attr {
 			if a.Key == attr && valid(a.Val) {
-				needle := []byte(a.Val)
-				at := bytes.Index(data[cursor:], needle)
+				at := bytes.Index(data[cursor:], []byte(a.Val))
 				if at >= 0 {
 					at += cursor
-					cursor = at + len(needle)
+					cursor = at + len(a.Val)
 					addText(doc, data, a.Val, at, &out)
 				}
 			}
@@ -193,143 +235,325 @@ func htmlLinks(doc string, data []byte) []record {
 	}
 	return out
 }
+
+// Goldmark supplies Markdown grammar and semantic destinations. Source ranges are then
+// located inside the parsed node range only, preserving raw byte spans for parity checks.
 func markdownLinks(doc string, data []byte) []record {
-	s := string(data)
-	var out []record // Inline, autolink, and reference destinations are emitted with raw URL spans.
-	for i := 0; i < len(s); i++ {
-		if s[i] == '<' {
-			if end := strings.IndexByte(s[i+1:], '>'); end >= 0 {
-				raw := s[i+1 : i+1+end]
-				addText(doc, data, raw, i+1, &out)
-				i += end + 1
+	source := text.NewReader(data)
+	root := goldmark.DefaultParser().Parse(source)
+	var out []record
+	ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		var raw string
+		switch n := node.(type) {
+		case *ast.Link:
+			raw = html.UnescapeString(string(n.Destination))
+		case *ast.Image:
+			raw = html.UnescapeString(string(n.Destination))
+		case *ast.AutoLink:
+			raw = string(n.URL(data))
+		case *ast.LinkReferenceDefinition:
+			raw = string(n.Destination)
+		}
+		if raw == "" || !valid(raw) {
+			return ast.WalkContinue, nil
+		}
+		segments := node.Text(data)
+		at := bytes.Index(data, []byte(raw))
+		if len(segments) > 0 {
+			if candidate := bytes.Index(data, []byte(raw)); candidate >= 0 {
+				at = candidate
 			}
 		}
-		if s[i] == '(' {
-			if end := strings.IndexByte(s[i+1:], ')'); end >= 0 {
-				raw := s[i+1 : i+1+end]
-				if strings.Contains(s[max(0, i-2):i], "]") {
-					addText(doc, data, raw, i+1, &out)
-				}
-				i += end + 1
-			}
+		if at >= 0 {
+			addText(doc, data, raw, at, &out)
 		}
-		if s[i] == '[' {
-			if close := strings.Index(s[i:], "]:"); close >= 0 {
-				start := i + close + 2
-				for start < len(s) && s[start] == ' ' {
-					start++
-				}
-				end := start
-				for end < len(s) && s[end] != ' ' && s[end] != '\n' {
-					end++
-				}
-				addText(doc, data, s[start:end], start, &out)
-				i = end
-			}
-		}
-	}
+		return ast.WalkContinue, nil
+	})
 	return out
 }
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
 
-func ooxmlLinks(doc string, data []byte) []record {
+func zipFiles(data []byte) map[string][]byte {
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		panic(err)
 	}
 	files := map[string][]byte{}
 	for _, f := range zr.File {
-		r, _ := f.Open()
-		b, _ := io.ReadAll(r)
+		r, err := f.Open()
+		if err != nil {
+			panic(err)
+		}
+		b, err := io.ReadAll(r)
 		r.Close()
+		if err != nil {
+			panic(err)
+		}
 		files[f.Name] = b
 	}
-	rels := map[string]map[string]string{}
-	for name, b := range files {
-		if strings.HasSuffix(name, ".rels") {
-			var rs xmlRelationships
-			if xml.Unmarshal(b, &rs) == nil {
-				m := map[string]string{}
-				for _, r := range rs.Items {
-					if r.Mode == "External" && strings.HasSuffix(r.Type, "/hyperlink") && valid(r.Target) {
-						m[r.ID] = r.Target
-					}
+	return files
+}
+func relationMap(data []byte, external bool) map[string]string {
+	var rs relationships
+	if xml.Unmarshal(data, &rs) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, r := range rs.Items {
+		if (!external || r.Mode == "External") && (!external || valid(r.Target)) {
+			out[r.ID] = r.Target
+		}
+	}
+	return out
+}
+func relationshipPart(part string) string {
+	return path.Dir(part) + "/_rels/" + path.Base(part) + ".rels"
+}
+func attr(start xml.StartElement, space, local string) string {
+	for _, a := range start.Attr {
+		if a.Name.Space == space && a.Name.Local == local {
+			return a.Value
+		}
+	}
+	return ""
+}
+func localAttr(start xml.StartElement, local string) string {
+	for _, a := range start.Attr {
+		if a.Name.Local == local {
+			return a.Value
+		}
+	}
+	return ""
+}
+func fieldURL(value string) string {
+	i := strings.Index(value, "HYPERLINK")
+	if i < 0 {
+		return ""
+	}
+	rest := value[i+len("HYPERLINK"):]
+	i = strings.Index(rest, "http")
+	if i < 0 {
+		return ""
+	}
+	rest = rest[i:]
+	if i = strings.IndexFunc(rest, func(r rune) bool { return r == '"' || r == ')' || r == ' ' || r == '\t' || r == '\n' }); i >= 0 {
+		rest = rest[:i]
+	}
+	if valid(rest) {
+		return rest
+	}
+	return ""
+}
+
+func docxLinks(doc string, data []byte) []record {
+	files, rels := zipFiles(data), relationMap(zipFiles(data)["word/_rels/document.xml.rels"], true)
+	dec := xml.NewDecoder(bytes.NewReader(files["word/document.xml"]))
+	paragraph := 0
+	var out []record
+	var field strings.Builder
+	inField := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Space != wordNS {
+				continue
+			}
+			switch t.Name.Local {
+			case "p":
+				paragraph++
+			case "hyperlink":
+				if u := rels[attr(t, relNS, "id")]; u != "" {
+					out = append(out, record{doc, u, map[string]any{"type": "docx", "paragraph": paragraph}, nil})
 				}
-				rels[name] = m
+			case "fldSimple":
+				if u := fieldURL(localAttr(t, "instr")); u != "" {
+					out = append(out, record{doc, u, map[string]any{"type": "docx", "paragraph": paragraph}, nil})
+				}
+			case "fldChar":
+				if localAttr(t, "fldCharType") == "begin" {
+					inField = true
+					field.Reset()
+				}
+				if localAttr(t, "fldCharType") == "end" {
+					if u := fieldURL(field.String()); u != "" {
+						out = append(out, record{doc, u, map[string]any{"type": "docx", "paragraph": paragraph}, nil})
+					}
+					inField = false
+				}
+			}
+		case xml.CharData:
+			if inField {
+				field.Write([]byte(t))
+			}
+		}
+	}
+	return out
+}
+func xlsxLinks(doc string, data []byte) []record {
+	files := zipFiles(data)
+	wbRels := relationMap(files["xl/_rels/workbook.xml.rels"], false)
+	dec := xml.NewDecoder(bytes.NewReader(files["xl/workbook.xml"]))
+	type sheet struct{ name, part string }
+	var sheets []sheet
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		if t, ok := tok.(xml.StartElement); ok && t.Name.Local == "sheet" {
+			if target := wbRels[attr(t, relNS, "id")]; target != "" {
+				sheets = append(sheets, sheet{localAttr(t, "name"), resolveTarget("xl/workbook.xml", target)})
 			}
 		}
 	}
 	var out []record
-	for name, b := range files {
-		if !strings.HasSuffix(name, ".xml") || strings.Contains(name, "_rels/") {
+	for _, s := range sheets {
+		rels := relationMap(files[relationshipPart(s.part)], true)
+		dec = xml.NewDecoder(bytes.NewReader(files[s.part]))
+		cell, formula, inFormula := "", "", false
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				panic(err)
+			}
+			switch t := tok.(type) {
+			case xml.StartElement:
+				switch t.Name.Local {
+				case "c":
+					cell = localAttr(t, "r")
+				case "hyperlink":
+					if u := rels[attr(t, relNS, "id")]; u != "" {
+						out = append(out, record{doc, u, map[string]any{"type": "xlsx", "sheet": s.name, "cell": localAttr(t, "ref")}, nil})
+					}
+				case "f":
+					inFormula = true
+					formula = ""
+				}
+			case xml.CharData:
+				if inFormula {
+					formula += string(t)
+				}
+			case xml.EndElement:
+				if t.Name.Local == "f" {
+					if u := fieldURL(formula); u != "" {
+						out = append(out, record{doc, u, map[string]any{"type": "xlsx", "sheet": s.name, "cell": cell}, nil})
+					}
+					inFormula = false
+				}
+			}
+		}
+	}
+	return out
+}
+func pptxLinks(doc string, data []byte) []record {
+	files := zipFiles(data)
+	rels := relationMap(files["ppt/_rels/presentation.xml.rels"], false)
+	dec := xml.NewDecoder(bytes.NewReader(files["ppt/presentation.xml"]))
+	var slides []string
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			panic(err)
+		}
+		if t, ok := tok.(xml.StartElement); ok && t.Name.Space == presNS && t.Name.Local == "sldId" {
+			if target := rels[attr(t, relNS, "id")]; target != "" {
+				slides = append(slides, resolveTarget("ppt/presentation.xml", target))
+			}
+		}
+	}
+	if len(slides) == 0 {
+		for name := range files {
+			if strings.HasPrefix(name, "ppt/slides/slide") && strings.HasSuffix(name, ".xml") {
+				slides = append(slides, name)
+			}
+		}
+		sort.Strings(slides)
+	}
+	var out []record
+	for i, slide := range slides {
+		rels = relationMap(files[relationshipPart(slide)], true)
+		dec = xml.NewDecoder(bytes.NewReader(files[slide]))
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				panic(err)
+			}
+			if t, ok := tok.(xml.StartElement); ok && t.Name.Space == drawNS && (t.Name.Local == "hlinkClick" || t.Name.Local == "hlinkHover") {
+				if u := rels[attr(t, relNS, "id")]; u != "" {
+					out = append(out, record{doc, u, map[string]any{"type": "pptx", "slide": i + 1}, nil})
+				}
+			}
+		}
+	}
+	return out
+}
+func resolveTarget(source, target string) string {
+	if strings.HasPrefix(target, "/") {
+		return strings.TrimPrefix(target, "/")
+	}
+	return path.Clean(path.Join(path.Dir(source), target))
+}
+
+// pdfcpu resolves xref entries, indirect references, page inheritance, and decoded streams.
+func pdfLinks(doc string, data []byte) []record {
+	ctx, err := api.ReadAndValidate(bytes.NewReader(data), model.NewDefaultConfiguration())
+	if err != nil {
+		panic(err)
+	}
+	var out []record
+	for page := 1; page <= ctx.PageCount; page++ {
+		d, _, _, err := ctx.PageDict(page, false)
+		if err != nil {
 			continue
 		}
-		rel := path.Dir(name) + "/_rels/" + path.Base(name) + ".rels"
-		for id, target := range rels[rel] {
-			marker := []byte("r:id=\"" + id + "\"")
-			if at := bytes.Index(b, marker); at >= 0 {
-				loc := map[string]any{"type": "docx", "paragraph": bytes.Count(b[:at], []byte("<w:p"))}
-				if filepath.Ext(doc) == ".xlsx" {
-					cell := ""
-					before := string(b[:at])
-					if i := strings.LastIndex(before, "<hyperlink ref=\""); i >= 0 {
-						rest := before[i+16:]
-						cell = strings.Split(rest, "\"")[0]
+		if annots, err := ctx.DereferenceArray(d["Annots"]); err == nil {
+			for i, a := range annots {
+				ad, err := ctx.DereferenceDict(a)
+				if err != nil {
+					continue
+				}
+				action, err := ctx.DereferenceDict(ad["A"])
+				if err != nil {
+					continue
+				}
+				if action.NameEntry("S") != nil && *action.NameEntry("S") == "URI" {
+					if u, err := ctx.DereferenceText(action["URI"]); err == nil && valid(u) {
+						out = append(out, record{doc, u, map[string]any{"type": "pdf", "page": page, "annotation": i}, nil})
 					}
-					loc = map[string]any{"type": "xlsx", "sheet": "Generated", "cell": cell}
 				}
-				if filepath.Ext(doc) == ".pptx" {
-					loc = map[string]any{"type": "pptx", "slide": 1}
-				}
-				out = append(out, record{doc, target, loc, nil})
+			}
+		}
+		content, err := ctx.PageContent(d, page)
+		if err == nil {
+			for _, r := range bareLinks(doc, content) {
+				r.Location = map[string]any{"type": "pdf", "page": page, "annotation": nil}
+				r.Span = nil
+				out = append(out, r)
 			}
 		}
 	}
 	return out
 }
 
-func pdfLinks(doc string, data []byte) []record { // Object-aware scan: streams are decoded according to their dictionary before URL extraction.
-	s := string(data)
-	var out []record
-	for _, piece := range strings.Split(s, "endobj") {
-		if !strings.Contains(piece, "obj") {
-			continue
-		}
-		page := 1
-		if strings.Contains(piece, "/Subtype /Link") && strings.Contains(piece, "/S /URI") {
-			if uri := strings.Index(piece, "/URI ("); uri >= 0 {
-				raw := strings.Split(piece[uri+6:], ")")[0]
-				if valid(raw) {
-					out = append(out, record{doc, raw, map[string]any{"type": "pdf", "page": page, "annotation": 0}, nil})
-				}
-			}
-		}
-		if strings.Contains(piece, "stream") {
-			stream := strings.Split(strings.Split(piece, "stream")[1], "endstream")[0]
-			if strings.Contains(piece, "/FlateDecode") {
-				r, err := zlib.NewReader(strings.NewReader(strings.TrimLeft(stream, "\r\n")))
-				if err != nil {
-					continue
-				}
-				b, err := io.ReadAll(r)
-				r.Close()
-				if err != nil {
-					continue
-				}
-				stream = string(b)
-			}
-			for _, word := range strings.Fields(stream) {
-				raw := strings.Trim(word, "()")
-				if valid(raw) {
-					out = append(out, record{doc, raw, map[string]any{"type": "pdf", "page": page, "annotation": nil}, nil})
-				}
-			}
-		}
-	}
-	return out
-}
+var _ types.Object

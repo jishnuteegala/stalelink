@@ -19,11 +19,16 @@ fn main() {
     let mut args = env::args().skip(1);
     match (args.next().as_deref(), args.next()) {
         (Some("generate"), Some(directory)) => generate(Path::new(&directory)),
-        (Some("extract"), Some(directory)) => extract_directory(Path::new(&directory), 0, 1),
+        (Some("extract"), Some(directory)) => extract_directory(Path::new(&directory), 0, 1, None),
         (Some("throughput"), Some(directory)) => {
             let warmup = args.next().unwrap_or_else(|| "1".into()).parse().unwrap();
             let passes = args.next().unwrap_or_else(|| "5".into()).parse().unwrap();
-            extract_directory(Path::new(&directory), warmup, passes);
+            extract_directory(
+                Path::new(&directory),
+                warmup,
+                passes,
+                args.next().as_deref(),
+            );
         }
         _ => panic!(
             "usage: stalelink-bench-harness <generate|extract|throughput> <directory> [warmup passes]"
@@ -36,13 +41,12 @@ fn generate(directory: &Path) {
     fs::create_dir_all(directory).unwrap();
     let mut seed = 0x5EED_C0DE_u64;
     for (name, links) in [("small", 10), ("medium", 100), ("large", 500)] {
-        for copy in 0..5 {
+        for copy in 0..15 {
             let name = format!("{name}-{copy:02}");
             write_text(directory, "md", &name, links, &mut seed, |url| {
-                match copy % 3 {
+                match copy % 2 {
                     0 => format!("[reference]({url})\n"),
-                    1 => format!("<{url}>\n"),
-                    _ => format!("[reference]: {url}\n"),
+                    _ => format!("<{url}>\n"),
                 }
             });
             write_text(directory, "html", &name, links, &mut seed, |url| {
@@ -164,7 +168,7 @@ fn write_pdf(dir: &Path, size: &str, links: usize, seed: &mut u64, compressed: b
     let objects = [
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
-        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 6 0 R >> >> /Contents 4 0 R /Annots [5 0 R] >>"
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 6 0 R >> >> /Contents 4 0 R /Annots [5 0 R] >>"
             .to_owned(),
         format!(
             "<< /Length {} {} >>\nstream\n",
@@ -206,7 +210,10 @@ fn write_pdf(dir: &Path, size: &str, links: usize, seed: &mut u64, compressed: b
     fs::write(dir.join(format!("{size}.pdf")), pdf).unwrap();
 }
 
-fn all_links(directory: &Path) -> Vec<stalelink_core::model::FoundLink> {
+fn all_links(
+    directory: &Path,
+    format_filter: Option<&str>,
+) -> Vec<stalelink_core::model::FoundLink> {
     let mut links = Vec::new();
     let mut paths = fs::read_dir(directory)
         .unwrap()
@@ -214,11 +221,13 @@ fn all_links(directory: &Path) -> Vec<stalelink_core::model::FoundLink> {
         .collect::<Vec<_>>();
     paths.sort();
     for path in paths {
-        let Some(format) = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .and_then(format_of)
-        else {
+        let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if format_filter.is_some_and(|filter| filter != extension) {
+            continue;
+        }
+        let Some(format) = format_of(extension) else {
             continue;
         };
         let bytes = fs::read(&path).unwrap();
@@ -243,15 +252,15 @@ fn all_links(directory: &Path) -> Vec<stalelink_core::model::FoundLink> {
     links
 }
 
-fn extract_directory(directory: &Path, warmup: usize, passes: usize) {
+fn extract_directory(directory: &Path, warmup: usize, passes: usize, format_filter: Option<&str>) {
     for _ in 0..warmup {
-        let _ = all_links(directory);
+        let _ = all_links(directory, format_filter);
     }
     let mut elapsed = Vec::new();
     let mut links = Vec::new();
     for _ in 0..passes {
         let start = Instant::now();
-        links = all_links(directory);
+        links = all_links(directory, format_filter);
         elapsed.push(start.elapsed().as_secs_f64());
     }
     elapsed.sort_by(f64::total_cmp);
@@ -277,7 +286,7 @@ fn extract_directory(directory: &Path, warmup: usize, passes: usize) {
     println!(
         "{}",
         serde_json::json!({
-            "documents": fs::read_dir(directory).unwrap().count(),
+            "documents": if format_filter.is_some() { links.iter().map(|link| &link.source.path).collect::<std::collections::HashSet<_>>().len() } else { fs::read_dir(directory).unwrap().count() },
             "links": links.len(),
             "digest": format!("{:016x}", hasher.finish()),
             "records": records,

@@ -30,6 +30,13 @@ function Get-RecordDigest($receipt) {
   (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
+function Get-Median([double[]]$values) {
+  $ordered = @($values | Sort-Object)
+  $middle = [int]($ordered.Count / 2)
+  if (($ordered.Count % 2) -eq 1) { return $ordered[$middle] }
+  return ($ordered[$middle - 1] + $ordered[$middle]) / 2
+}
+
 function Invoke-Harness($name, $program, [string[]]$arguments) {
   $info = [Diagnostics.ProcessStartInfo]::new($program)
   $info.UseShellExecute = $false
@@ -48,7 +55,7 @@ function Invoke-Harness($name, $program, [string[]]$arguments) {
   $output = $stdout.GetAwaiter().GetResult()
   $errors = $stderr.GetAwaiter().GetResult()
   $exitCode = $process.ExitCode
-  $process.Refresh() # PeakWorkingSet64 is a kernel-maintained process-lifetime maximum.
+  $process.Refresh() # PeakWorkingSetSize is a kernel-maintained process-lifetime maximum.
   if ($exitCode -ne 0) { throw "$name exited ${exitCode}: $errors" }
   try { $receipt = $output | ConvertFrom-Json } catch { throw "$name emitted invalid JSON: $output`n$errors" }
   if ($null -eq $receipt.links -or $null -eq $receipt.documents -or $null -eq $receipt.records) { throw "$name emitted an incomplete receipt" }
@@ -105,6 +112,7 @@ try {
 
   $steady = @{ Rust = @(); Go = @() }
   $steadyPeak = @{ Rust = @(); Go = @() }
+  $perFormat = @{ Rust = @{}; Go = @{} }
   foreach ($name in @('Rust', 'Go')) {
     $program = if ($name -eq 'Rust') { $rust } else { $go }
     for ($iteration = 0; $iteration -lt $Iterations; $iteration++) {
@@ -114,6 +122,19 @@ try {
       Assert-Equivalent $candidate $reference "throughput iteration $iteration $name" | Out-Null
       $steady[$name] += ($documents / [double]$run.Receipt.median_seconds)
       $steadyPeak[$name] += $run.PeakWorkingSetBytes
+    }
+    foreach ($format in @('md', 'html', 'txt', 'docx', 'xlsx', 'pptx', 'pdf')) {
+      $samples = @()
+      for ($iteration = 0; $iteration -lt $Iterations; $iteration++) {
+        $run = Invoke-Harness $name $program @('throughput', $corpus, $WarmupPasses, $TimedPasses, $format)
+        $samples += ($run.Receipt.documents / [double]$run.Receipt.median_seconds)
+      }
+      $ordered = $samples | Sort-Object
+      $perFormat[$name][$format] = [pscustomobject]@{
+        median_docs_per_second = [Math]::Round((Get-Median $ordered), 2)
+        min_docs_per_second = [Math]::Round($ordered[0], 2)
+        max_docs_per_second = [Math]::Round($ordered[-1], 2)
+      }
     }
   }
 
@@ -126,9 +147,12 @@ try {
       links = $links
       records_digest = $digest
       formats = $baselineRust.Receipt.formats
-      throughput_median_docs_per_second = [Math]::Round($throughput[[int]($throughput.Count / 2)], 2)
+      per_format_throughput = $perFormat[$name]
+      throughput_median_docs_per_second = [Math]::Round((Get-Median $throughput), 2)
+      throughput_min_docs_per_second = [Math]::Round($throughput[0], 2)
+      throughput_max_docs_per_second = [Math]::Round($throughput[-1], 2)
       throughput_peak_working_set_mib = [Math]::Round((($steadyPeak[$name] | Measure-Object -Maximum).Maximum / 1MB), 2)
-      cold_completion_median_ms = [Math]::Round($coldValues[[int]($coldValues.Count / 2)], 0)
+      cold_completion_median_ms = [Math]::Round((Get-Median $coldValues), 0)
       cold_completion_min_ms = [Math]::Round($coldValues[0], 0)
       cold_completion_max_ms = [Math]::Round($coldValues[-1], 0)
       cold_peak_working_set_mib = [Math]::Round((($coldPeak[$name] | Measure-Object -Maximum).Maximum / 1MB), 2)
