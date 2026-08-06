@@ -624,6 +624,7 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
+    use crate::model::Confidence;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -634,7 +635,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::model::Confidence;
 
     async fn checker() -> HttpChecker {
         HttpChecker::new(Duration::from_secs(2), 0, 2, "stalelink-test".into()).unwrap()

@@ -12,7 +12,7 @@ Fully local and open source: no telemetry. Network requests are made only for re
 
 - **Formats:** PDF, DOCX, XLSX, PPTX, Markdown, HTML, plain text
 - **Checks:** HTTP status, soft-404s, redirect chains, login walls, staleness signals (deprecated banners, versioned-URL drift), local file paths, intra-document anchors, cross-document relative links
-- **Auth tiers:** plain HTTP -> browser-profile cookies -> real browser (CDP) for suspect links (Chrome, Edge, Brave, Chromium, Firefox)
+- **Auth tiers:** plain HTTP -> browser-profile cookies -> real browser (CDP) for suspect links (Chrome, Edge, Brave, Chromium; Firefox supports tier 2 and CDP attach only)
 - **Output:** human table, `--json`, SARIF; confidence levels (dead-certain, likely-dead, auth-walled, outdated, suspect); suggested replacement URLs; CI-friendly exit codes
 - **Auto-fix:** `stalelink fix` previews link rewrites as a diff; `--write` applies them, across every supported format
 - **Performance:** parallel parsing, URL dedupe, response caching, polite per-host rate limits
@@ -47,7 +47,7 @@ exclude-domain = ["example.test"]
 fail-on = "suspect"
 ```
 
-TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`; CLI `--timeout` is seconds, while `--cache-ttl` uses humantime. `[auth] auth` accepts `off`, `cookies`, or `browser`; `[auth] browser` accepts `auto`, `chrome`, `edge`, `brave`, `chromium`, or `firefox`. These auth settings, plus `[fix] write`, `backup`, and `copy`, are validated placeholders until their respective functionality lands.
+TOML and environment durations use humantime syntax such as `30s`, `2h`, or `7d`; CLI `--timeout` is seconds, while `--cache-ttl` uses humantime. `[auth] auth` accepts `off`, `cookies`, or `browser`; `[auth] browser` accepts `auto`, `chrome`, `edge`, `brave`, `chromium`, or `firefox`. `cookies` snapshots the selected browser store once per run and only attaches cookies after an auth-wall trigger. `browser` enables a bounded third escalation tier (25 links per run); it is opt-in and uses a dedicated profile, or `--cdp-url` to attach to a chosen debugging endpoint. Firefox cookie extraction (tier 2) is fully supported, but Firefox does not provide the CDP required to launch tier 3; use a Chromium browser or attach `--cdp-url` to any CDP endpoint. Explicit `--auth cookies` exits 3 when no readable cookie store is available.
 
 The response cache is SQLite in the platform cache directory by default, with a 24-hour TTL. Set `[cache] dir` or `STALELINK_CACHE_DIR` for another location. `--no-cache` neither reads nor creates it; `--refresh` ignores prior rows while replacing them with new results. Use `stalelink cache stats` to print hits, misses, entry count, and the SQLite/WAL/SHM size, or `stalelink cache clear` to purge the local cache.
 

@@ -27,6 +27,16 @@ url.workspace = true
 similar.workspace = true
 tempfile.workspace = true
 lopdf.workspace = true
+rookie.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+
+[features]
+live-browser = ["dep:chromiumoxide"]
+
+[dependencies.chromiumoxide]
+workspace = true
+optional = true
 
 [dev-dependencies]
 assert_cmd = "2"

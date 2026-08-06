@@ -173,9 +173,9 @@ impl VerdictCache {
                     }
                 }
             }
-            Some((None, checked_at, _)) => {
+            Some((None, checked_at, tier)) => {
                 let age = now.saturating_sub(checked_at as u64);
-                if age <= ttl.as_secs() {
+                if age <= ttl.as_secs() && tier <= current_cap {
                     Some(None)
                 } else {
                     None
@@ -193,13 +193,15 @@ impl VerdictCache {
         Ok(result)
     }
 
-    fn put(&self, url: &Url, verdict: &Option<Verdict>) -> Result<(), String> {
+    fn put(&self, url: &Url, verdict: &Option<Verdict>, producing_cap: u8) -> Result<(), String> {
         let json = verdict
             .as_ref()
             .map(serde_json::to_string)
             .transpose()
             .map_err(|error| format!("serializing cache verdict: {error}"))?;
-        let tier = verdict.as_ref().map_or(1, |verdict| verdict.tier);
+        let tier = verdict
+            .as_ref()
+            .map_or(producing_cap, |verdict| verdict.tier);
         let connection = self
             .connection
             .lock()
@@ -269,7 +271,9 @@ impl<C: Checker> Checker for CachingChecker<C> {
             let cache = Arc::clone(&self.cache);
             let value = verdict.clone();
             let key = url.clone();
-            match tokio::task::spawn_blocking(move || cache.put(&key, &value)).await {
+            let producing_cap = self.current_cap;
+            match tokio::task::spawn_blocking(move || cache.put(&key, &value, producing_cap)).await
+            {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => self.record_error(error),
                 Err(error) => self.record_error(format!("cache worker failed: {error}")),
@@ -280,7 +284,8 @@ impl<C: Checker> Checker for CachingChecker<C> {
 }
 
 pub fn reusable(verdict: &Verdict, cached_tier: u8, current_cap: u8) -> bool {
-    cached_tier >= current_cap || verdict.confidence != Confidence::AuthWalled
+    cached_tier <= current_cap
+        && (verdict.confidence != Confidence::AuthWalled || cached_tier >= current_cap)
 }
 
 pub fn normalised_url(url: &Url) -> String {
@@ -342,5 +347,16 @@ mod tests {
         assert!(!reusable(&verdict(Confidence::AuthWalled, 1), 1, 2));
         assert!(reusable(&verdict(Confidence::DeadCertain, 1), 1, 2));
         assert!(reusable(&verdict(Confidence::AuthWalled, 2), 2, 2));
+        assert!(!reusable(&verdict(Confidence::AuthWalled, 2), 2, 1));
+        assert!(!reusable(&verdict(Confidence::DeadCertain, 2), 2, 1));
+    }
+
+    #[test]
+    fn clean_result_at_higher_cap_is_a_cache_miss() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = VerdictCache::open(directory.path().join("cache.sqlite")).unwrap();
+        let url: Url = "https://example.test/private".parse().unwrap();
+        cache.put(&url, &None, 2).unwrap();
+        assert_eq!(cache.get(&url, Duration::from_secs(60), 1).unwrap(), None);
     }
 }

@@ -1,3 +1,4 @@
+mod auth;
 mod cache;
 mod config;
 mod output;
@@ -173,11 +174,14 @@ struct NetworkArgs {
 #[derive(Debug, Clone, Args)]
 struct AuthArgs {
     /// Maximum auth tier: off = plain HTTP, cookies = browser cookies, browser = real browser
-    #[arg(long, value_enum, default_value_t = Auth::Cookies)]
-    auth: Auth,
+    #[arg(long, value_enum)]
+    auth: Option<Auth>,
     /// Which browser's cookies/profile to use
-    #[arg(long, value_enum, default_value_t = Browser::Auto)]
-    browser: Browser,
+    #[arg(long, value_enum)]
+    browser: Option<Browser>,
+    /// Connect tier 3 to this Chromium debugging endpoint instead of launching a profile
+    #[arg(long, requires = "auth")]
+    cdp_url: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -334,6 +338,14 @@ fn run_scan(args: ScanArgs, quiet: bool) -> ExitCode {
     ExitCode::from(exit_code)
 }
 
+fn tier3_unavailable(requested_auth: Option<Auth>) -> Result<(), u8> {
+    if matches!(requested_auth, Some(Auth::Browser)) {
+        Err(ENVIRONMENT)
+    } else {
+        Ok(())
+    }
+}
+
 fn scan_common(
     args: &CommonArgs,
     output: Option<&OutputArgs>,
@@ -429,13 +441,14 @@ fn scan_common(
             return Err(ENVIRONMENT);
         }
     }
-    let checker = match HttpChecker::new(
+    let tier1 = match HttpChecker::new(
         settings.network.timeout,
         settings.network.retries,
         settings.network.per_host as usize,
         settings
             .network
             .user_agent
+            .clone()
             .unwrap_or_else(|| format!("stalelink/{}", env!("CARGO_PKG_VERSION"))),
     ) {
         Ok(checker) => checker,
@@ -443,6 +456,86 @@ fn scan_common(
             eprintln!("error: creating HTTP client: {error}");
             return Err(ENVIRONMENT);
         }
+    };
+    let requested_auth = args.auth.auth;
+    let configured_auth = match settings.auth.auth.as_str() {
+        "off" => Auth::Off,
+        "browser" => Auth::Browser,
+        _ => Auth::Cookies,
+    };
+    let selected_auth = requested_auth.unwrap_or(configured_auth);
+    let configured_browser = match settings.auth.browser.as_str() {
+        "chrome" => Browser::Chrome,
+        "edge" => Browser::Edge,
+        "brave" => Browser::Brave,
+        "chromium" => Browser::Chromium,
+        "firefox" => Browser::Firefox,
+        _ => Browser::Auto,
+    };
+    let browser = match args.auth.browser.unwrap_or(configured_browser) {
+        Browser::Auto => auth::Browser::Auto,
+        Browser::Chrome => auth::Browser::Chrome,
+        Browser::Edge => auth::Browser::Edge,
+        Browser::Brave => auth::Browser::Brave,
+        Browser::Chromium => auth::Browser::Chromium,
+        Browser::Firefox => auth::Browser::Firefox,
+    };
+    let cap = match selected_auth {
+        Auth::Off => auth::AuthCap::Off,
+        Auth::Cookies => auth::AuthCap::Cookies,
+        Auth::Browser => auth::AuthCap::Browser,
+    };
+    let snapshot = if matches!(requested_auth, Some(Auth::Cookies)) {
+        match auth::snapshot(browser) {
+            Ok(snapshot) if !snapshot.is_empty() => {
+                eprintln!(
+                    "notice: reading {} browser-profile cookies for escalated links",
+                    browser.name()
+                );
+                Some(snapshot)
+            }
+            Ok(_) => {
+                eprintln!(
+                    "warning: {} has no readable cookie store; check its profile or use --auth off",
+                    browser.name()
+                );
+                if matches!(requested_auth, Some(Auth::Cookies)) {
+                    return Err(ENVIRONMENT);
+                }
+                None
+            }
+            Err(error) => {
+                #[cfg(windows)]
+                eprintln!(
+                    "warning: {} cookie store is unavailable ({error}); Chrome app-bound cookies may require elevation. Run from an elevated prompt or choose another browser",
+                    browser.name()
+                );
+                #[cfg(not(windows))]
+                eprintln!(
+                    "warning: {} cookie store is unavailable ({error}); close the browser or choose another browser",
+                    browser.name()
+                );
+                if matches!(requested_auth, Some(Auth::Cookies)) {
+                    return Err(ENVIRONMENT);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let user_agent = settings
+        .network
+        .user_agent
+        .clone()
+        .unwrap_or_else(|| format!("stalelink/{}", env!("CARGO_PKG_VERSION")));
+    let tier2 = if let Some(snapshot) = snapshot {
+        auth::CookieChecker::new(settings.network.timeout, user_agent.clone(), snapshot).ok()
+    } else if cap.tier() >= 2 {
+        auth::CookieChecker::from_browser(settings.network.timeout, user_agent.clone(), browser)
+            .ok()
+    } else {
+        None
     };
     let cache_path = cache_path(settings.cache.dir.as_deref());
     let input = ScanInput {
@@ -474,6 +567,58 @@ fn scan_common(
             return Err(ENVIRONMENT);
         }
     };
+    #[cfg(feature = "live-browser")]
+    let tier3 = if matches!(selected_auth, Auth::Browser) {
+        let profile = auth::browser_profile(&cache_path, browser);
+        let executable = match auth::browser_launch(browser, args.auth.cdp_url.as_deref()) {
+            Ok(auth::BrowserLaunch::Attach) => Ok(None),
+            Ok(auth::BrowserLaunch::Launch) => auth::discover_executable(browser).map(Some),
+            Err(error) => Err(error),
+        };
+        match executable {
+            Ok(executable) => match runtime.block_on(auth::CdpPageDriver::launch(
+                &profile,
+                args.auth.cdp_url.as_deref(),
+                executable.as_deref(),
+            )) {
+                Ok(drivers) => Some(auth::BrowserChecker::new(drivers)),
+                Err(error) => {
+                    eprintln!(
+                        "warning: {} browser tier is unavailable ({error}); start it with remote debugging or check its installation",
+                        browser.name()
+                    );
+                    if let Err(exit_code) = tier3_unavailable(requested_auth) {
+                        return Err(exit_code);
+                    }
+                    None
+                }
+            },
+            Err(error) => {
+                eprintln!(
+                    "warning: {} browser tier is unavailable ({error}); install it or use --auth cookies",
+                    browser.name()
+                );
+                if let Err(exit_code) = tier3_unavailable(requested_auth) {
+                    return Err(exit_code);
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(not(feature = "live-browser"))]
+    if matches!(selected_auth, Auth::Browser) {
+        eprintln!(
+            "warning: browser tier is unavailable; install a live-browser build or use --auth cookies"
+        );
+        tier3_unavailable(requested_auth)?;
+    }
+    #[cfg(feature = "live-browser")]
+    let checker = auth::AuthChecker::new(tier1, tier2, tier3, cap);
+    #[cfg(not(feature = "live-browser"))]
+    let checker =
+        auth::AuthChecker::new(tier1, tier2, Option::<auth::UnavailablePageTier>::None, cap);
     let show_progress = !quiet && io::stderr().is_terminal();
     let result = if network.no_cache {
         if show_progress {
@@ -489,8 +634,13 @@ fn scan_common(
                 return Err(ENVIRONMENT);
             }
         };
-        let checker =
-            cache::CachingChecker::new(checker, cache, settings.cache.ttl, 1, network.refresh);
+        let checker = cache::CachingChecker::new(
+            checker,
+            cache,
+            settings.cache.ttl,
+            cap.tier(),
+            network.refresh,
+        );
         let result = if show_progress {
             runtime.block_on(scan(input, &checker, &StderrProgress))
         } else {
@@ -872,6 +1022,13 @@ mod tests {
         for (level, expected) in cases {
             assert_eq!(Confidence::from(level), expected);
         }
+    }
+
+    #[test]
+    fn explicitly_requested_unavailable_browser_tier_exits_three() {
+        assert_eq!(tier3_unavailable(Some(Auth::Browser)), Err(ENVIRONMENT));
+        assert_eq!(tier3_unavailable(Some(Auth::Cookies)), Ok(()));
+        assert_eq!(tier3_unavailable(None), Ok(()));
     }
 
     #[test]

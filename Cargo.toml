@@ -34,9 +34,11 @@ quick-xml = "0.39"
 directories = "6"
 figment = { version = "0.10", features = ["env", "toml"] }
 humantime = "2"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 similar = "2.7"
 proptest = "1.6"
 tempfile = "3"
 html-escape = "0.2"
+rookie = "0.5.6"
+chromiumoxide = { version = "0.9.1", default-features = false }
