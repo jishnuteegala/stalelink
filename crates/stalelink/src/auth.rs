@@ -1154,11 +1154,23 @@ mod tests {
 
     #[test]
     fn browser_discovery_and_profiles_are_browser_specific() {
+        // Windows candidates need PROGRAMFILES, so match Edge portably.
         let found = discover_executable_with(Browser::Edge, |path| {
-            path.ends_with("Microsoft/Edge/Application/msedge.exe")
+            path.to_string_lossy().to_ascii_lowercase().contains("edge")
         })
         .unwrap();
-        assert!(found.ends_with("Microsoft/Edge/Application/msedge.exe"));
+        assert!(
+            found
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("edge")
+        );
+        assert!(
+            discover_executable_with(Browser::Chrome, |path| {
+                path.to_string_lossy().to_ascii_lowercase().contains("edge")
+            })
+            .is_err()
+        );
         let cache = Path::new("cache");
         assert_ne!(
             browser_profile(cache, Browser::Chrome),
