@@ -10,24 +10,73 @@ It is fully local: there is no telemetry. It makes network requests only to chec
 
 ## Install
 
-The first tagged release (`v0.1.0`) activates the package-manager channels below. Until then, build from this checkout with stable Rust.
+The first tagged release (`v0.1.0`) activates the package-manager channels below. Until then, build from this checkout with stable Rust (`cargo install --path crates/stalelink`).
 
-| Channel | Command |
-| --- | --- |
-| Cargo | `cargo install stalelink` (available from v0.1.0) |
-| npm / npx | `npm install -g stalelink` or `npx stalelink scan docs/` (available from v0.1.0) |
-| Homebrew | `brew tap jishnuteegala/tap && brew install stalelink` (available from v0.1.0) |
-| Scoop | `scoop bucket add stalelink https://github.com/jishnuteegala/scoop-bucket && scoop install stalelink` (available from v0.1.0) |
-| WinGet | `winget install jishnuteegala.stalelink` (available from v0.1.0, after the first Microsoft submission is accepted) |
-| Chocolatey | `choco install stalelink` (available from v0.1.0, pending Chocolatey moderation) |
-| Shell | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.sh | sh` (available from v0.1.0) |
-| PowerShell | `irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.ps1 | iex` (available from v0.1.0) |
-| Debian / Ubuntu | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.deb; sudo dpkg -i stalelink-${v#v}-amd64.deb` (ARM64: replace `amd64` with `arm64`) |
-| Fedora / RHEL | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.rpm; sudo rpm -i stalelink-${v#v}-amd64.rpm` (ARM64: replace `amd64` with `arm64`) |
-| Alpine | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.apk; sudo apk add --allow-untrusted stalelink-${v#v}-amd64.apk` (ARM64: replace `amd64` with `arm64`) |
-| Arch package | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.pkg.tar.zst; sudo pacman -U stalelink-${v#v}-amd64.pkg.tar.zst` (ARM64: replace `amd64` with `arm64`) |
-| AUR | `yay -S stalelink-bin` (available from v0.1.0) |
-| Source | `cargo install --path crates/stalelink` |
+```sh
+# Shell installer (macOS / Linux)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.sh | sh
+
+# PowerShell installer (Windows)
+irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.ps1 | iex
+
+# Cargo
+cargo install stalelink
+
+# npm / bun / pnpm (or one-off: npx stalelink scan docs/)
+npm install -g stalelink
+
+# Homebrew (macOS / Linux)
+brew install jishnuteegala/tap/stalelink
+
+# winget (Windows)
+winget install jishnuteegala.stalelink
+
+# Scoop (Windows)
+scoop bucket add jishnuteegala https://github.com/jishnuteegala/scoop-bucket
+scoop install stalelink
+
+# Chocolatey (Windows, pending moderation)
+choco install stalelink
+
+# AUR (Arch Linux)
+paru -S stalelink-bin
+```
+
+The winget install works once the first Microsoft submission is accepted.
+
+### Linux packages
+
+`stalelink` is not in the official Debian/Fedora/etc. archives, so plain `apt install stalelink` won't work. Instead, every release attaches native packages you download and install manually. For example (amd64; replace `amd64` with `arm64` for ARM):
+
+```sh
+VERSION=$(curl -s https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | grep -Po '"tag_name": "v\K[^"]*')
+
+# Debian / Ubuntu
+curl -LO "https://github.com/jishnuteegala/stalelink/releases/download/v${VERSION}/stalelink-${VERSION}-amd64.deb"
+sudo dpkg -i "stalelink-${VERSION}-amd64.deb"
+
+# Fedora / RHEL
+sudo dnf install "https://github.com/jishnuteegala/stalelink/releases/download/v${VERSION}/stalelink-${VERSION}-amd64.rpm"
+
+# Alpine
+curl -LO "https://github.com/jishnuteegala/stalelink/releases/download/v${VERSION}/stalelink-${VERSION}-amd64.apk"
+sudo apk add --allow-untrusted "stalelink-${VERSION}-amd64.apk"
+```
+
+`.pkg.tar.zst` (Arch) packages are also attached to each [release](https://github.com/jishnuteegala/stalelink/releases); Arch users should prefer the AUR package above, which handles updates. Note these manual installs don't auto-update — Homebrew, npm, or the AUR are better if you want upgrades handled for you.
+
+Prebuilt binary archives are also on the Releases page — the build matrix covers Linux, macOS, and Windows on x86_64 + aarch64. Each release contains these checksummed payloads (replace `${VERSION}` with the release version):
+
+```text
+stalelink-x86_64-unknown-linux-gnu.tar.xz
+stalelink-aarch64-unknown-linux-gnu.tar.xz
+stalelink-x86_64-apple-darwin.tar.xz
+stalelink-aarch64-apple-darwin.tar.xz
+stalelink-x86_64-pc-windows-msvc.zip
+stalelink-aarch64-pc-windows-msvc.zip
+stalelink-${VERSION}-{amd64,arm64}.{deb,rpm,apk,pkg.tar.zst}
+sha256.sum
+```
 
 ## Scan Links
 
