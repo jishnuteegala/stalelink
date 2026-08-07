@@ -86,7 +86,7 @@ futures = "0.3"
 httpdate = "1.0"
 # Text extraction works without lopdf's optional image, font, and rayon support.
 lopdf = { version = "0.39", default-features = false }
-zip = { version = "7.2", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 quick-xml = "0.39"
 directories = "6"
 figment = { version = "0.10", features = ["env", "toml"] }
