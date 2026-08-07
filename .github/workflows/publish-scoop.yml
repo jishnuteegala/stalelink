@@ -1,0 +1,51 @@
+name: Publish Scoop manifest
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: ubuntu-22.04
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
+        run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      GH_TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Generate and push manifest
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          source packaging/scripts/channel-lib.sh
+          x64_asset="stalelink-x86_64-pc-windows-msvc.zip"
+          arm64_asset="stalelink-aarch64-pc-windows-msvc.zip"
+          gh release download "$TAG" --repo jishnuteegala/stalelink --pattern sha256.sum --dir . >/dev/null
+          x64_sha256="$(require_release_checksum sha256.sum "$x64_asset")"
+          arm64_sha256="$(require_release_checksum sha256.sum "$arm64_asset")"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/scoop-bucket.git" bucket
+          render_scoop_manifest bucket/stalelink.json "$version" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${x64_asset}" "$x64_sha256" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${arm64_asset}" "$arm64_sha256"
+          git -C bucket config user.name github-actions[bot]
+          git -C bucket config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C bucket add stalelink.json
+          git -C bucket commit -m "stalelink ${version}"
+          git -C bucket push

@@ -1,0 +1,48 @@
+name: Publish Homebrew formula
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: ubuntu-22.04
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: artifacts-*
+          path: Formula
+          merge-multiple: true
+      - name: Push cargo-dist-generated formula
+        run: |
+          set -euo pipefail
+          formula="$(find Formula -maxdepth 1 -type f -name '*.rb' -print -quit)"
+          test -n "$formula"
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp "$formula" tap/Formula/stalelink.rb
+          git -C tap config user.name github-actions[bot]
+          git -C tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C tap add Formula/stalelink.rb
+          git -C tap commit -m "stalelink $(echo "$PLAN" | jq -r '.releases[0].app_version')"
+          git -C tap push

@@ -1,0 +1,55 @@
+name: Publish AUR package
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: ubuntu-22.04
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.AUR_KEY }}
+        run: test -n "$KEY" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      AUR_KEY: ${{ secrets.AUR_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Render, validate, and push PKGBUILD
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          asset="stalelink-x86_64-unknown-linux-gnu.tar.xz"
+          source packaging/scripts/channel-lib.sh
+          gh release download "$TAG" --pattern sha256.sum --dir . >/dev/null
+          sha256="$(require_release_checksum sha256.sum "$asset")"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          git clone ssh://aur@aur.archlinux.org/stalelink-bin.git aur
+          render_pkgbuild packaging/aur/PKGBUILD.template aur/PKGBUILD "$version" "$sha256"
+          (cd aur && makepkg --printsrcinfo > .SRCINFO)
+          git -C aur config user.name github-actions[bot]
+          git -C aur config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C aur add PKGBUILD .SRCINFO
+          git -C aur commit -m "stalelink-bin ${version}"
+          git -C aur push
