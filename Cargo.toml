@@ -58,6 +58,13 @@ install-updater = false
 
 github-action-commits = { "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803", "actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6" }
 
+# libesedb-sys's C sources only build with real MSVC on Windows; dist's default
+# cargo-xwin cross-compile from Linux hits POSIX-only code paths. Build ARM64
+# Windows natively instead (windows-11-arm is free for public repos).
+[workspace.metadata.dist.github-custom-runners.aarch64-pc-windows-msvc]
+runner = "windows-11-arm"
+host = "aarch64-pc-windows-msvc"
+
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
