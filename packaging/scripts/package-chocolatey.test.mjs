@@ -19,7 +19,7 @@ test("Chocolatey package uses public Windows archives and checksums", () => {
   mkdirSync(temp);
   const x64 = createHash("sha256").update("x64 archive").digest("hex");
   const arm64 = createHash("sha256").update("arm64 archive").digest("hex");
-  writeFileSync(join(dist, "sha256.sum"), `${x64}  stalelink-x86_64-pc-windows-msvc.zip\n${arm64}  stalelink-aarch64-pc-windows-msvc.zip\n`);
+  writeFileSync(join(dist, "sha256.sum"), `${x64} *stalelink-x86_64-pc-windows-msvc.zip\n${arm64}  stalelink-aarch64-pc-windows-msvc.zip\n`);
   const choco = process.platform === "win32" ? join(bin, "choco.cmd") : join(bin, "choco");
   writeFileSync(choco, process.platform === "win32" ? "@echo off\r\ntype nul > %4\\stalelink.1.2.3.nupkg\r\n" : "#!/bin/sh\ntouch \"$4/stalelink.1.2.3.nupkg\"\n");
   if (process.platform !== "win32") chmodSync(choco, 0o755);
