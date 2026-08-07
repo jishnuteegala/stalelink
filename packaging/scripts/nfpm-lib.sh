@@ -35,10 +35,14 @@ nfpm_package_name() {
 }
 
 build_nfpm_packages() {
-  local nfpm=$1 config=$2 binary=$3 output_dir=$4 version=$5 arch=$6 format output
+  local nfpm=$1 config=$2 binary=$3 output_dir=$4 version=$5 arch=$6 format output rendered
   mkdir -p "$output_dir"
+  # nfpm does not expand env vars in contents globs; render the config instead.
+  rendered=$(mktemp)
+  sed -e "s|\${VERSION}|$version|g" -e "s|\${ARCH}|$arch|g" -e "s|\${BINARY}|$binary|g" "$config" > "$rendered"
   while IFS= read -r format; do
     output="$output_dir/$(nfpm_package_name "$version" "$arch" "$format")"
-    VERSION="$version" ARCH="$arch" BINARY="$binary" "$nfpm" package --config "$config" --packager "$format" --target "$output"
+    "$nfpm" package --config "$rendered" --packager "$format" --target "$output"
   done < <(nfpm_formats)
+  rm -f "$rendered"
 }
