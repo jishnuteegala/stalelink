@@ -19,6 +19,21 @@ $feed = 'https://community.chocolatey.org/api/v2'
 $query = "$feed/Packages()?`$filter=Id%20eq%20%27stalelink%27%20and%20Version%20eq%20%27$Version%27"
 $response = Invoke-WebRequest -Uri $query -UseBasicParsing
 if ($response.Content -match '<entry>') {
+    $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
+    $remote = Join-Path $tempRoot "stalelink.$Version.remote.nupkg"
+    $localFiles = Join-Path $tempRoot "stalelink.$Version.local"
+    $remoteFiles = Join-Path $tempRoot "stalelink.$Version.remote"
+    Invoke-WebRequest -Uri "$feed/package/stalelink/$Version" -OutFile $remote -UseBasicParsing
+    Remove-Item $localFiles, $remoteFiles -Recurse -Force -ErrorAction SilentlyContinue
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($package, $localFiles)
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($remote, $remoteFiles)
+    $localInstall = Get-FileHash (Join-Path $localFiles 'tools/chocolateyinstall.ps1') -Algorithm SHA256
+    $remoteInstall = Get-FileHash (Join-Path $remoteFiles 'tools/chocolateyinstall.ps1') -Algorithm SHA256
+    $localSpec = Get-FileHash (Join-Path $localFiles 'stalelink.nuspec') -Algorithm SHA256
+    $remoteSpec = Get-FileHash (Join-Path $remoteFiles 'stalelink.nuspec') -Algorithm SHA256
+    if ($localInstall.Hash -ne $remoteInstall.Hash -or $localSpec.Hash -ne $remoteSpec.Hash) {
+        throw "public Chocolatey stalelink $Version conflicts with the canonical package"
+    }
     Write-Output "verified public Chocolatey stalelink $Version"
     exit 0
 }

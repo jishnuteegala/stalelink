@@ -28,6 +28,7 @@ jobs:
     env:
       TAG: ${{ fromJson(inputs.plan).announcement_tag }}
       CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

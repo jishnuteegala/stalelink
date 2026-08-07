@@ -8,13 +8,13 @@ safe to keep under version control.
 
 | Channel | Credential | External state |
 | --- | --- | --- |
-| GitHub Releases | `GITHUB_TOKEN` | Managed by Actions |
-| npm | Trusted publishing (OIDC), no stored secret | One `0.0.0` bootstrap stub; real releases start at `0.1.0` |
-| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | Published from dedicated repositories |
-| WinGet | `WINGET_GITHUB_TOKEN` | Published through a fork PR to Microsoft |
-| AUR | `AUR_KEY` | `stalelink-bin` published from AUR |
-| Chocolatey | `CHOCOLATEY_API_KEY` | Submission awaits Chocolatey moderation |
-| crates.io | `CARGO_REGISTRY_TOKEN` | Publishes `stalelink-core` then `stalelink` |
+| GitHub Releases | `GITHUB_TOKEN` | Workflow is ready; the first release is pending. |
+| npm | Trusted publishing (OIDC), no stored secret | Not bootstrapped; complete [npm trusted publishing](#npm-trusted-publishing) before the first release. |
+| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | Not bootstrapped; complete the one-time repositories and [credential setup](#channel-credentials). |
+| WinGet | `WINGET_GITHUB_TOKEN` | Not bootstrapped; complete the one-time fork and [credential setup](#channel-credentials). |
+| AUR | `AUR_KEY` | `stalelink-bin` is not published; complete the [AUR setup](#aur) and add its secret. |
+| Chocolatey | `CHOCOLATEY_API_KEY` | No package has been submitted; complete the [Chocolatey setup](#chocolatey) and add its secret. |
+| crates.io | `CARGO_REGISTRY_TOKEN` | Not published; add the token during [credential setup](#setting-secrets) before the first release. |
 
 ## npm trusted publishing
 
@@ -53,8 +53,10 @@ workflow. `publish-npm-oidc.yml` cannot be dispatched independently.
 
 The initial bootstrap happens before the first release. Merge the release PR
 after it completes; the real `0.1.0` release then publishes with OIDC and npm
-provenance. The workflow retains E404 tolerance so a missing initial trust
-configuration leaves the draft available rather than failing its release chain.
+provenance. The workflow tolerates npm E404 only as a recovery fallback: it
+emits a prominent warning and allows the release to become public without an
+npm package. Bootstrap before the first release rather than relying on this
+fallback.
 
 Set publishing access to require 2FA and disallow tokens; OIDC trusted
 publishing is unaffected:

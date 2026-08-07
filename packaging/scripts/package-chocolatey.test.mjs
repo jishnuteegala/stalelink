@@ -43,3 +43,56 @@ test("Chocolatey package uses public Windows archives and checksums", () => {
     rmSync(work, { recursive: true, force: true });
   }
 });
+
+test("Chocolatey publisher verifies canonical files in an existing public package", () => {
+  const work = mkdtempSync(join(tmpdir(), "stalelink-choco-publish-"));
+  const dist = join(work, "target", "distrib");
+  const temp = join(work, "temp");
+  const localFiles = join(work, "local");
+  const remoteFiles = join(work, "remote");
+  const localPackage = join(dist, "stalelink.1.2.3.nupkg");
+  const remotePackage = join(work, "remote.nupkg");
+  mkdirSync(join(localFiles, "tools"), { recursive: true });
+  mkdirSync(join(remoteFiles, "tools"), { recursive: true });
+  mkdirSync(dist, { recursive: true });
+  mkdirSync(temp);
+  writeFileSync(join(localFiles, "stalelink.nuspec"), "canonical nuspec");
+  writeFileSync(join(localFiles, "tools", "chocolateyinstall.ps1"), "canonical installer");
+  writeFileSync(join(remoteFiles, "stalelink.nuspec"), "canonical nuspec");
+  writeFileSync(join(remoteFiles, "tools", "chocolateyinstall.ps1"), "canonical installer");
+  const wrapper = join(work, "publish.ps1");
+  writeFileSync(wrapper, `
+param([string]$Publisher, [string]$LocalFiles, [string]$RemoteFiles)
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+Remove-Item $env:LOCAL_PACKAGE, $env:REMOTE_PACKAGE -Force -ErrorAction SilentlyContinue
+[System.IO.Compression.ZipFile]::CreateFromDirectory($LocalFiles, $env:LOCAL_PACKAGE)
+[System.IO.Compression.ZipFile]::CreateFromDirectory($RemoteFiles, $env:REMOTE_PACKAGE)
+function Invoke-WebRequest {
+  param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+  if ($Uri -like '*Packages()?*') { return [pscustomobject]@{ Content = '<entry>' } }
+  if ($Uri -like '*/package/stalelink/1.2.3') { Copy-Item $env:REMOTE_PACKAGE $OutFile; return }
+  throw "unexpected URI: $Uri"
+}
+& $Publisher -Version 1.2.3
+`);
+  const env = {
+    ...process.env,
+    CHOCOLATEY_API_KEY: "test-key",
+    LOCAL_PACKAGE: localPackage,
+    PUBLISH_CHOCOLATEY_ROOT: work,
+    REMOTE_PACKAGE: remotePackage,
+    TEMP: temp,
+  };
+  try {
+    const matching = spawnSync(powershell, ["-NoProfile", "-File", wrapper, join(root, "packaging", "scripts", "publish-chocolatey.ps1"), localFiles, remoteFiles], { encoding: "utf8", env });
+    assert.equal(matching.status, 0, matching.stderr || matching.stdout);
+    assert.match(matching.stdout, /verified public Chocolatey stalelink 1\.2\.3/);
+
+    writeFileSync(join(remoteFiles, "tools", "chocolateyinstall.ps1"), "conflicting installer");
+    const conflicting = spawnSync(powershell, ["-NoProfile", "-File", wrapper, join(root, "packaging", "scripts", "publish-chocolatey.ps1"), localFiles, remoteFiles], { encoding: "utf8", env });
+    assert.notEqual(conflicting.status, 0);
+    assert.match(`${conflicting.stderr}\n${conflicting.stdout}`, /conflicts with the canonical package/);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
