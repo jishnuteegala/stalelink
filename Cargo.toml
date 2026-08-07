@@ -31,6 +31,10 @@ npm-scope = "@jishnuteegala"
 # cargo-dist owns release.yml. Custom entries below are reusable workflows.
 host-jobs = ["./create-draft-release"]
 publish-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-nfpm"]
+# Caller jobs must grant a superset of each reusable workflow's declared
+# permissions; the dist default (id-token+packages) omits contents and fails
+# GitHub's startup validation. Overrides replace the defaults entirely.
+github-custom-job-permissions = { "publish-homebrew" = { contents = "read" }, "publish-npm-oidc" = { contents = "read", id-token = "write" }, "publish-nfpm" = { contents = "write" } }
 post-announce-jobs = ["./publish-scoop", "./publish-aur", "./publish-winget", "./publish-chocolatey"]
 # cargo-dist's native Homebrew publisher writes this formula to the tap.
 tap = "jishnuteegala/homebrew-tap"
