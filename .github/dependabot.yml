@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: gomod
+    directory: /bench/go-port
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
