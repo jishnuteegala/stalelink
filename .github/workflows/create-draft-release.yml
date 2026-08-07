@@ -1,0 +1,30 @@
+name: Create draft release
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  create:
+    runs-on: ubuntu-22.04
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      TITLE: ${{ fromJson(inputs.plan).announcement_title }}
+      BODY: ${{ fromJson(inputs.plan).announcement_github_body }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Create the draft required by core publishers
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
+          else
+            printf '%s\n' "$BODY" > notes.md
+            gh release create "$TAG" --draft --title "$TITLE" --notes-file notes.md
+          fi
