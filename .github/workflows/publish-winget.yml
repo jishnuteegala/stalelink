@@ -41,4 +41,14 @@ jobs:
           $version = $env:TAG.Substring(1)
           $x64Url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-x86_64-pc-windows-msvc.zip"
           $arm64Url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-aarch64-pc-windows-msvc.zip"
-          & "$env:RUNNER_TEMP\komac.exe" update jishnuteegala.stalelink --version $version --urls $x64Url $arm64Url --submit --token $env:GH_TOKEN
+          $log = & "$env:RUNNER_TEMP\komac.exe" update jishnuteegala.stalelink --version $version --urls $x64Url $arm64Url --submit --token $env:GH_TOKEN 2>&1 | Out-String
+          Write-Host $log
+          if ($LASTEXITCODE -ne 0) {
+            if ($log -match 'does not exist in microsoft/winget-pkgs') {
+              # komac update only works for existing packages; the first manifest
+              # must be bootstrapped interactively with `komac new` or a manual PR.
+              Write-Host "::warning::jishnuteegala.stalelink is not in winget-pkgs yet. Bootstrap the first manifest manually (komac new jishnuteegala.stalelink), then future releases will submit update PRs automatically."
+              exit 0
+            }
+            exit $LASTEXITCODE
+          }

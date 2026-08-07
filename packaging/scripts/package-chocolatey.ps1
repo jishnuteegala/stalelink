@@ -12,7 +12,7 @@ if (-not (Test-Path $checksums)) { throw "missing $checksums" }
 
 function Get-ReleaseChecksum([string]$Architecture) {
     $name = "stalelink-$Architecture-pc-windows-msvc.zip"
-    $line = Select-String -Path $checksums -Pattern "^[a-fA-F0-9]{64}  $([regex]::Escape($name))`$"
+    $line = Select-String -Path $checksums -Pattern "^[a-fA-F0-9]{64} [ *]$([regex]::Escape($name))`$"
     if (@($line).Count -ne 1) { throw "expected one checksum for $name" }
     return $line.Line.Substring(0, 64).ToLowerInvariant()
 }
