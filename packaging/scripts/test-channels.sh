@@ -23,3 +23,4 @@ render_scoop_manifest "$tmp/stalelink.json" 0.1.0 "https://example.test/$x64" "$
 node "$root/packaging/scripts/validate-scoop-manifest.js" "$tmp/stalelink.json"
 render_pkgbuild "$root/packaging/aur/PKGBUILD.template" "$tmp/PKGBUILD" 0.1.0 "$(require_release_checksum "$checksum_fixture" stalelink-x86_64-unknown-linux-gnu.tar.xz)"
 bash -n "$tmp/PKGBUILD"
+node "$root/packaging/scripts/package-chocolatey.test.mjs"

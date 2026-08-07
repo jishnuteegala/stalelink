@@ -1,0 +1,41 @@
+name: Publish Chocolatey package
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: windows-latest
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
+    runs-on: windows-latest
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Download release checksums
+        shell: bash
+        run: gh release download "$TAG" --repo jishnuteegala/stalelink --pattern sha256.sum --dir target/distrib
+      - name: Generate, submit, and verify Chocolatey package
+        shell: pwsh
+        run: ./packaging/scripts/publish-chocolatey.ps1 -Version $env:TAG.TrimStart('v')

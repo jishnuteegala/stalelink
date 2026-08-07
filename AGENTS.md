@@ -4,6 +4,7 @@ Rust CLI that scans local documents for dead and outdated links.
 Toolchain: Rust stable (MSVC on Windows).
 Full local gate (run before every commit): `cargo fmt --all --check && cargo lint && cargo test --workspace`.
 `lint` is an alias in `.cargo/config.toml` for `clippy --all-targets -- -D warnings`; cargo aliases cannot chain commands, so the gate is the three-command line above.
+PR titles must use Conventional Commits because they become squash commit messages and release changelog entries.
 
 ## Agent skills
 

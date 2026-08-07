@@ -29,7 +29,7 @@ npm-package = "stalelink"
 # cargo-dist owns release.yml. Custom entries below are reusable workflows.
 host-jobs = ["./create-draft-release"]
 publish-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-nfpm"]
-post-announce-jobs = ["./publish-scoop", "./publish-aur", "./publish-winget"]
+post-announce-jobs = ["./publish-scoop", "./publish-aur", "./publish-winget", "./publish-chocolatey"]
 # cargo-dist's native Homebrew publisher writes this formula to the tap.
 tap = "jishnuteegala/homebrew-tap"
 formula = "stalelink"

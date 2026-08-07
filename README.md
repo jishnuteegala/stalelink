@@ -19,6 +19,7 @@ The first tagged release (`v0.1.0`) activates the package-manager channels below
 | Homebrew | `brew tap jishnuteegala/tap && brew install stalelink` (available from v0.1.0) |
 | Scoop | `scoop bucket add stalelink https://github.com/jishnuteegala/scoop-bucket && scoop install stalelink` (available from v0.1.0) |
 | WinGet | `winget install jishnuteegala.stalelink` (available from v0.1.0, after the first Microsoft submission is accepted) |
+| Chocolatey | `choco install stalelink` (available from v0.1.0, pending Chocolatey moderation) |
 | Shell | `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.sh | sh` (available from v0.1.0) |
 | PowerShell | `irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelink-installer.ps1 | iex` (available from v0.1.0) |
 | Debian / Ubuntu | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.deb; sudo dpkg -i stalelink-${v#v}-amd64.deb` (ARM64: replace `amd64` with `arm64`) |
@@ -109,11 +110,11 @@ The JSON schema is [`schema/stalelink-report.v1.json`](schema/stalelink-report.v
 
 ## Release Channels
 
-The repository uses draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, including checksums, shell/PowerShell installers, cargo-dist's generated `stalelink` npm installer, a Homebrew tap, Scoop, nFPM Linux packages, AUR, and WinGet. `release-plz` maintains the human-reviewed release PR. After its merge, it publishes `stalelink-core` then `stalelink` to crates.io, creates the version tag, and dispatches cargo-dist. Cargo-dist creates the draft and uploads artifacts; Homebrew and nFPM complete before cargo-dist undrafts it. npm trusted-publisher setup failures are reported without blocking that first release. Scoop, AUR, and WinGet then use the public release URLs. Optional credential-backed channels cleanly skip when their secrets are not configured.
+The repository uses draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, including checksums, shell/PowerShell installers, cargo-dist's generated `stalelink` npm installer, a Homebrew tap, Scoop, nFPM Linux packages, AUR, WinGet, and Chocolatey. `release-plz` maintains the human-reviewed release PR. After its merge, it publishes `stalelink-core` then `stalelink` to crates.io, creates the version tag, and dispatches cargo-dist. Cargo-dist creates the draft and uploads artifacts; Homebrew and nFPM complete before cargo-dist undrafts it. Scoop, AUR, WinGet, and Chocolatey then use the public release URLs. Optional credential-backed channels cleanly skip when their secrets are not configured.
 
 ### First release
 
-Run the release workflow once to create the draft, then, while logged into npm, run `node scripts/bootstrap-npm.js v0.1.0 draft`. It downloads the draft's cargo-dist-generated package, verifies its name and version, and publishes it interactively. A checked-out tag can instead use `node scripts/bootstrap-npm.js v0.1.0 build`. Then configure npm trusted publishing for package `stalelink`, repository `jishnuteegala/stalelink`, workflow `.github/workflows/release.yml`, and rerun the workflow for that tag. Future releases use GitHub Actions OIDC. See [`docs/release-setup.md`](docs/release-setup.md) for the sanitized maintainer setup reference.
+Before the first release, bootstrap npm trusted publishing interactively with the central script documented in [`PUBLISHING-SETUP.md`](PUBLISHING-SETUP.md). It publishes a `0.0.0` placeholder, configures OIDC, and locks token publishing before the first release PR merges. The first real release is `0.1.0` and publishes with GitHub Actions OIDC provenance.
 
 ## License
 
