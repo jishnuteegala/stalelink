@@ -18,7 +18,7 @@ while IFS= read -r arch; do
 done < <(nfpm_arches)
 
 while IFS= read -r format; do
-  documented="stalelink-\${v#v}-amd64.$(nfpm_extension "$format")"
+  documented="stalelink-\${VERSION}-amd64.$(nfpm_extension "$format")"
   grep -Fq "$documented" "$root/README.md"
 done < <(nfpm_formats)
 

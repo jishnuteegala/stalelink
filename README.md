@@ -74,7 +74,14 @@ stalelink-x86_64-apple-darwin.tar.xz
 stalelink-aarch64-apple-darwin.tar.xz
 stalelink-x86_64-pc-windows-msvc.zip
 stalelink-aarch64-pc-windows-msvc.zip
-stalelink-${VERSION}-{amd64,arm64}.{deb,rpm,apk,pkg.tar.zst}
+stalelink-${VERSION}-amd64.deb
+stalelink-${VERSION}-arm64.deb
+stalelink-${VERSION}-amd64.rpm
+stalelink-${VERSION}-arm64.rpm
+stalelink-${VERSION}-amd64.apk
+stalelink-${VERSION}-arm64.apk
+stalelink-${VERSION}-amd64.pkg.tar.zst
+stalelink-${VERSION}-arm64.pkg.tar.zst
 sha256.sum
 ```
 
