@@ -18,6 +18,8 @@ jobs:
       TITLE: ${{ fromJson(inputs.plan).announcement_title }}
       BODY: ${{ fromJson(inputs.plan).announcement_github_body }}
       GH_TOKEN: ${{ github.token }}
+      # No checkout step, so gh needs the repo set explicitly.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Create the draft required by core publishers
         run: |
