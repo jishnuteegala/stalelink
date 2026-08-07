@@ -1,0 +1,41 @@
+name: Publish WinGet manifest
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  credentials:
+    runs-on: ubuntu-22.04
+    outputs:
+      available: ${{ steps.check.outputs.available }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  publish:
+    needs: credentials
+    if: needs.credentials.outputs.available == 'true'
+    runs-on: windows-latest
+    env:
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      GH_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+    steps:
+      - name: Install pinned Komac
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/russellbanks/Komac/releases/download/v2.11.0/komac.exe -OutFile "$env:RUNNER_TEMP\komac.exe"
+          & "$env:RUNNER_TEMP\komac.exe" --version
+      - name: Submit manifest pull request
+        shell: pwsh
+        run: |
+          $version = $env:TAG.Substring(1)
+          $url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-x86_64-pc-windows-msvc.zip"
+          & "$env:RUNNER_TEMP\komac.exe" update jishnuteegala.stalelink --version $version --urls $url --submit --token $env:GH_TOKEN

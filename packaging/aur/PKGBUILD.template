@@ -1,0 +1,16 @@
+pkgname=stalelink-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Find dead and outdated links in local documents'
+arch=('x86_64')
+url='https://github.com/jishnuteegala/stalelink'
+license=('MIT')
+provides=('stalelink')
+conflicts=('stalelink')
+source=("stalelink-${pkgver}-x86_64-unknown-linux-gnu.tar.xz::https://github.com/jishnuteegala/stalelink/releases/download/v${pkgver}/stalelink-x86_64-unknown-linux-gnu.tar.xz")
+sha256sums=('@SHA256@')
+
+package() {
+  install -Dm755 "${srcdir}/stalelink-${pkgver}-x86_64-unknown-linux-gnu/stalelink" "${pkgdir}/usr/bin/stalelink"
+  install -Dm644 "${srcdir}/stalelink-${pkgver}-x86_64-unknown-linux-gnu/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

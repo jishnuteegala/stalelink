@@ -1,0 +1,49 @@
+name: Publish nFPM packages
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    env:
+      NFPM_VERSION: v1.13.3
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Install pinned nFPM
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+      - name: Package Linux binary and upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          archive="$(basename "$(ls artifacts/stalelink-x86_64-unknown-linux-gnu.tar.xz)")"
+          mkdir unpack out
+          tar -xJf "artifacts/$archive" -C unpack
+          binary="$(find unpack -type f -name stalelink -print -quit)"
+          test -n "$binary"
+          for format in deb rpm apk archlinux; do
+            VERSION="$version" BINARY="$binary" nfpm package --config packaging/nfpm.yaml --packager "$format" --target out/
+          done
+          sha256sum out/* > out/stalelink-${version}-linux-packages.sha256
+          gh release upload "$TAG" out/* --clobber

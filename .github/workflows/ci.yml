@@ -52,6 +52,22 @@ jobs:
         with:
           tool: cargo-dist
       - run: dist plan --output-format=json
+      - run: dist generate --check
+
+  distribution-templates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parse workflow and package YAML
+        run: ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' $(git ls-files '*.yml' '*.yaml')
+      - name: Validate distribution templates
+        run: |
+          set -euo pipefail
+          test -f packaging/nfpm.yaml
+          grep -q '^version: \${VERSION}$' packaging/nfpm.yaml
+          sed -e 's/@VERSION@/0.1.0/g' -e 's/@SHA256@/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/g' packaging/aur/PKGBUILD.template > PKGBUILD
+          bash -n PKGBUILD
+          node -e 'const manifest={version:"0.1.0",architecture:{"64bit":{url:"https://example.test/stalelink.zip",hash:"a".repeat(64)}},bin:"stalelink.exe"}; JSON.parse(JSON.stringify(manifest));'
 
   release-plz-dry-run:
     runs-on: ubuntu-latest

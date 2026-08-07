@@ -9,6 +9,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/jishnuteegala/stalelink"
 description = "Find dead and outdated links in local documents"
+homepage = "https://github.com/jishnuteegala/stalelink"
 keywords = ["links", "link-checker", "documents", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -19,13 +20,19 @@ dist = true
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm"]
+installers = ["shell", "powershell", "npm", "homebrew"]
 # The generated installer is published as the unscoped `stalelink` npm package.
 npm-package = "stalelink"
-publish-jobs = ["npm"]
+# cargo-dist owns release.yml. Custom entries below are reusable workflows.
+publish-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-nfpm"]
+post-announce-jobs = ["./publish-scoop", "./publish-aur", "./publish-winget"]
+# cargo-dist's native Homebrew publisher writes this formula to the tap.
+tap = "jishnuteegala/homebrew-tap"
+formula = "stalelink"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# Whether dist should create a Github Release or use an existing draft
+# The checked-in generated workflow adds --draft to its release creation step.
+# cargo-dist 0.32.0 has no draft-release setting, so retain that narrow exception.
 create-release = true
 # Whether to enable GitHub Attestations
 github-attestations = true
@@ -37,8 +44,9 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
-# The release workflow intentionally adds --draft to GitHub release creation.
 allow-dirty = ["ci"]
+
+github-action-commits = { "actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803", "actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6" }
 
 [workspace.dependencies]
 chrono = { version = "0.4", features = ["serde"] }
