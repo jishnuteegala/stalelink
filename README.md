@@ -22,8 +22,8 @@ irm https://github.com/jishnuteegala/stalelink/releases/latest/download/stalelin
 # Cargo
 cargo install stalelink
 
-# npm / bun / pnpm (or one-off: npx stalelink scan docs/)
-npm install -g stalelink
+# npm / bun / pnpm (or one-off: npx @jishnuteegala/stalelink scan docs/)
+npm install -g @jishnuteegala/stalelink
 
 # Homebrew (macOS / Linux)
 brew install jishnuteegala/tap/stalelink

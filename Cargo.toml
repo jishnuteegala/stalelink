@@ -24,8 +24,10 @@ ci = "github"
 dispatch-releases = true
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "homebrew"]
-# The generated installer is published as the unscoped `stalelink` npm package.
+# npm rejects the unscoped name (too similar to `stylelint`), so the installer
+# is published as the scoped `@jishnuteegala/stalelink` package.
 npm-package = "stalelink"
+npm-scope = "@jishnuteegala"
 # cargo-dist owns release.yml. Custom entries below are reusable workflows.
 host-jobs = ["./create-draft-release"]
 publish-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-nfpm"]
