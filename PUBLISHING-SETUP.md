@@ -10,8 +10,8 @@ safe to keep under version control.
 | --- | --- | --- |
 | GitHub Releases | `GITHUB_TOKEN` | Workflow is ready; the first release is pending. |
 | npm | Trusted publishing (OIDC), no stored secret | Not bootstrapped; complete [npm trusted publishing](#npm-trusted-publishing) before the first release. |
-| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | Not bootstrapped; complete the one-time repositories and [credential setup](#channel-credentials). |
-| WinGet | `WINGET_GITHUB_TOKEN` | Not bootstrapped; complete the one-time fork and [credential setup](#channel-credentials). |
+| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | `jishnuteegala/homebrew-tap` and `jishnuteegala/scoop-bucket` exist; no stalelink manifest is published yet. Complete the [credential setup](#channel-credentials). |
+| WinGet | `WINGET_GITHUB_TOKEN` | The `jishnuteegala/winget-pkgs` fork exists; no stalelink manifest is submitted yet. Complete the [credential setup](#channel-credentials). |
 | AUR | `AUR_KEY` | `stalelink-bin` is not published; complete the [AUR setup](#aur) and add its secret. |
 | Chocolatey | `CHOCOLATEY_API_KEY` | No package has been submitted; complete the [Chocolatey setup](#chocolatey) and add its secret. |
 | crates.io | `CARGO_REGISTRY_TOKEN` | Not published; add the token during [credential setup](#setting-secrets) before the first release. |
