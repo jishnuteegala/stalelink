@@ -1,7 +1,10 @@
-# Packaging Examples
+# Packaging Automation
 
-The files in this directory are unimplemented examples, not release automation.
-They contain placeholders and must be rendered manually from a cargo-dist release
-manifest before use. They are intentionally not consumed by CI or release
-workflows. cargo-dist's native GitHub Release archives and installers are the
-only automated distribution artifacts today.
+`nfpm.yaml` packages the cargo-dist Linux archives into deb, rpm, apk, and Arch
+artifacts for x64 and ARM64 in `publish-nfpm.yml`. `aur/PKGBUILD.template` and
+the Scoop template are rendered by their respective publishing workflows.
+
+`scripts/channel-lib.sh` holds shared checksum selection and rendering logic.
+`scripts/test-channels.sh` exercises it against the complete cargo-dist fixture
+asset list without network access. The WinGet template documents the matching
+two-architecture installer shape used by Komac.

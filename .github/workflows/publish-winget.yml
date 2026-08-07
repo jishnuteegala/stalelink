@@ -31,11 +31,14 @@ jobs:
       - name: Install pinned Komac
         shell: pwsh
         run: |
-          Invoke-WebRequest https://github.com/russellbanks/Komac/releases/download/v2.11.0/komac.exe -OutFile "$env:RUNNER_TEMP\komac.exe"
+          $asset = "komac-2.11.0-x86_64-pc-windows-msvc.exe"
+          Invoke-WebRequest "https://github.com/russellbanks/Komac/releases/download/v2.11.0/$asset" -OutFile "$env:RUNNER_TEMP\komac.exe"
+          if ((Get-FileHash "$env:RUNNER_TEMP\komac.exe" -Algorithm SHA256).Hash -ne "9B7B4504A2B469D4791DAC3295350BED4EE13C385340438D396EC9948B25FB12") { throw "Komac checksum mismatch" }
           & "$env:RUNNER_TEMP\komac.exe" --version
       - name: Submit manifest pull request
         shell: pwsh
         run: |
           $version = $env:TAG.Substring(1)
-          $url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-x86_64-pc-windows-msvc.zip"
-          & "$env:RUNNER_TEMP\komac.exe" update jishnuteegala.stalelink --version $version --urls $url --submit --token $env:GH_TOKEN
+          $x64Url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-x86_64-pc-windows-msvc.zip"
+          $arm64Url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-aarch64-pc-windows-msvc.zip"
+          & "$env:RUNNER_TEMP\komac.exe" update jishnuteegala.stalelink --version $version --urls $x64Url $arm64Url --submit --token $env:GH_TOKEN

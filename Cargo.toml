@@ -19,6 +19,9 @@ categories = ["command-line-utilities", "development-tools"]
 dist = true
 # CI backends to support
 ci = "github"
+# Generate a workflow_dispatch trigger so release-plz can start releases for
+# tags created with GITHUB_TOKEN (those tag pushes do not trigger workflows).
+dispatch-releases = true
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "homebrew"]
 # The generated installer is published as the unscoped `stalelink` npm package.

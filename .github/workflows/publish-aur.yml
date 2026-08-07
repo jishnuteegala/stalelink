@@ -38,17 +38,15 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           asset="stalelink-x86_64-unknown-linux-gnu.tar.xz"
-          checksum_file="$(gh release view "$TAG" --json assets --jq '.assets[].name | select(test("(?i)(sha256|checksum)"))' | head -n1)"
-          test -n "$checksum_file"
-          gh release download "$TAG" --pattern "$checksum_file" --dir . >/dev/null
-          sha256="$(awk -v asset="$asset" '$2 ~ asset { print $1 }' "$checksum_file")"
-          test -n "$sha256"
+          source packaging/scripts/channel-lib.sh
+          gh release download "$TAG" --pattern sha256.sum --dir . >/dev/null
+          sha256="$(require_release_checksum sha256.sum "$asset")"
           mkdir -p ~/.ssh
           printf '%s\n' "$AUR_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
           git clone ssh://aur@aur.archlinux.org/stalelink-bin.git aur
-          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256@/$sha256/g" packaging/aur/PKGBUILD.template > aur/PKGBUILD
+          render_pkgbuild packaging/aur/PKGBUILD.template aur/PKGBUILD "$version" "$sha256"
           (cd aur && makepkg --printsrcinfo > .SRCINFO)
           git -C aur config user.name github-actions[bot]
           git -C aur config user.email 41898282+github-actions[bot]@users.noreply.github.com

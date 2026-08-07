@@ -53,6 +53,10 @@ jobs:
           tool: cargo-dist
       - run: dist plan --output-format=json
       - run: dist generate --check
+      - name: Assert cargo-dist artifact names
+        run: dist plan --output-format=json | node packaging/scripts/test-dist-plan.js
+      - name: Assert release-plz dispatch contract
+        run: node packaging/scripts/test-release-dispatch.js
 
   distribution-templates:
     runs-on: ubuntu-latest
@@ -63,11 +67,18 @@ jobs:
       - name: Validate distribution templates
         run: |
           set -euo pipefail
-          test -f packaging/nfpm.yaml
-          grep -q '^version: \${VERSION}$' packaging/nfpm.yaml
-          sed -e 's/@VERSION@/0.1.0/g' -e 's/@SHA256@/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/g' packaging/aur/PKGBUILD.template > PKGBUILD
-          bash -n PKGBUILD
-          node -e 'const manifest={version:"0.1.0",architecture:{"64bit":{url:"https://example.test/stalelink.zip",hash:"a".repeat(64)}},bin:"stalelink.exe"}; JSON.parse(JSON.stringify(manifest));'
+          bash packaging/scripts/test-channels.sh
+      - name: Install verified nFPM
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -LsSf -o nfpm.tar.gz https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
+          printf '%s  %s\n' 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783 nfpm.tar.gz | sha256sum --check --strict
+          tar -xzf nfpm.tar.gz nfpm
+          chmod +x nfpm
+      - name: Build all nFPM package formats and architectures
+        run: bash packaging/scripts/test-nfpm.sh "$PWD/nfpm"
+      - name: Note Arch validation boundary
+        run: echo 'namcap requires an Arch environment; bash -n validates the rendered PKGBUILD here.'
 
   release-plz-dry-run:
     runs-on: ubuntu-latest

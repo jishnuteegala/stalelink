@@ -13,8 +13,17 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            arch: arm64
     env:
-      NFPM_VERSION: v1.13.3
+      NFPM_VERSION: v2.47.0
+      NFPM_ARCHIVE: nfpm_2.47.0_Linux_x86_64.tar.gz
+      NFPM_SHA256: 0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783
       TAG: ${{ fromJson(inputs.plan).announcement_tag }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -29,7 +38,9 @@ jobs:
       - name: Install pinned nFPM
         run: |
           set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -LsSf "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/nfpm_${NFPM_VERSION#v}_Linux_x86_64.tar.gz" | tar -xz -C /usr/local/bin nfpm
+          curl --proto '=https' --tlsv1.2 -LsSf -o nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/${NFPM_VERSION}/${NFPM_ARCHIVE}"
+          printf '%s  %s\n' "$NFPM_SHA256" nfpm.tar.gz | sha256sum --check --strict
+          tar -xzf nfpm.tar.gz -C /usr/local/bin nfpm
           nfpm --version
       - name: Package Linux binary and upload release assets
         env:
@@ -37,13 +48,20 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          archive="$(basename "$(ls artifacts/stalelink-x86_64-unknown-linux-gnu.tar.xz)")"
-          mkdir unpack out
+          archive="stalelink-${{ matrix.target }}.tar.xz"
+          test -f "artifacts/$archive"
+          mkdir unpack "out/${{ matrix.arch }}"
           tar -xJf "artifacts/$archive" -C unpack
           binary="$(find unpack -type f -name stalelink -print -quit)"
           test -n "$binary"
           for format in deb rpm apk archlinux; do
-            VERSION="$version" BINARY="$binary" nfpm package --config packaging/nfpm.yaml --packager "$format" --target out/
+            case "$format" in
+              deb) extension=deb ;;
+              rpm) extension=rpm ;;
+              apk) extension=apk ;;
+              archlinux) extension=pkg.tar.zst ;;
+            esac
+            VERSION="$version" ARCH="${{ matrix.arch }}" BINARY="$binary" nfpm package --config packaging/nfpm.yaml --packager "$format" --target "out/${{ matrix.arch }}/stalelink-${version}-${{ matrix.arch }}.${extension}"
           done
-          sha256sum out/* > out/stalelink-${version}-linux-packages.sha256
-          gh release upload "$TAG" out/* --clobber
+          sha256sum "out/${{ matrix.arch }}"/* > "out/stalelink-${version}-${{ matrix.arch }}-linux-packages.sha256"
+          gh release upload "$TAG" "out/${{ matrix.arch }}"/* "out/stalelink-${version}-${{ matrix.arch }}-linux-packages.sha256" --clobber

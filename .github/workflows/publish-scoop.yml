@@ -28,19 +28,22 @@ jobs:
       TAG: ${{ fromJson(inputs.plan).announcement_tag }}
       GH_TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
       - name: Generate and push manifest
         run: |
           set -euo pipefail
           version="${TAG#v}"
-          asset="stalelink-x86_64-pc-windows-msvc.zip"
-          url="https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${asset}"
-          checksum_file="$(gh release view "$TAG" --repo jishnuteegala/stalelink --json assets --jq '.assets[].name | select(test("(?i)(sha256|checksum)"))' | head -n1)"
-          test -n "$checksum_file"
-          gh release download "$TAG" --repo jishnuteegala/stalelink --pattern "$checksum_file" --dir . >/dev/null
-          sha256="$(awk -v asset="$asset" '$2 ~ asset { print $1 }' "$checksum_file")"
-          test -n "$sha256"
+          source packaging/scripts/channel-lib.sh
+          x64_asset="stalelink-x86_64-pc-windows-msvc.zip"
+          arm64_asset="stalelink-aarch64-pc-windows-msvc.zip"
+          gh release download "$TAG" --repo jishnuteegala/stalelink --pattern sha256.sum --dir . >/dev/null
+          x64_sha256="$(require_release_checksum sha256.sum "$x64_asset")"
+          arm64_sha256="$(require_release_checksum sha256.sum "$arm64_asset")"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/scoop-bucket.git" bucket
-          VERSION="$version" URL="$url" SHA256="$sha256" node -e 'const fs=require("fs"); fs.writeFileSync("bucket/stalelink.json", JSON.stringify({version:process.env.VERSION,description:"Find dead and outdated links in local documents.",homepage:"https://github.com/jishnuteegala/stalelink",license:"MIT",architecture:{"64bit":{url:process.env.URL,hash:process.env.SHA256}},bin:"stalelink.exe"},null,2)+"\n")'
+          render_scoop_manifest bucket/stalelink.json "$version" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${x64_asset}" "$x64_sha256" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${arm64_asset}" "$arm64_sha256"
           git -C bucket config user.name github-actions[bot]
           git -C bucket config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git -C bucket add stalelink.json

@@ -1,0 +1,16 @@
+stalelink-aarch64-apple-darwin.tar.xz
+stalelink-aarch64-apple-darwin.tar.xz.sha256
+stalelink-aarch64-unknown-linux-gnu.tar.xz
+stalelink-aarch64-unknown-linux-gnu.tar.xz.sha256
+stalelink-aarch64-pc-windows-msvc.zip
+stalelink-aarch64-pc-windows-msvc.zip.sha256
+stalelink-x86_64-apple-darwin.tar.xz
+stalelink-x86_64-apple-darwin.tar.xz.sha256
+stalelink-x86_64-unknown-linux-gnu.tar.xz
+stalelink-x86_64-unknown-linux-gnu.tar.xz.sha256
+stalelink-x86_64-pc-windows-msvc.zip
+stalelink-x86_64-pc-windows-msvc.zip.sha256
+stalelink-installer.ps1
+stalelink-installer.sh
+stalelink-npm-package.tar.gz
+sha256.sum
