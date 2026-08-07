@@ -54,14 +54,7 @@ jobs:
           tar -xJf "artifacts/$archive" -C unpack
           binary="$(find unpack -type f -name stalelink -print -quit)"
           test -n "$binary"
-          for format in deb rpm apk archlinux; do
-            case "$format" in
-              deb) extension=deb ;;
-              rpm) extension=rpm ;;
-              apk) extension=apk ;;
-              archlinux) extension=pkg.tar.zst ;;
-            esac
-            VERSION="$version" ARCH="${{ matrix.arch }}" BINARY="$binary" nfpm package --config packaging/nfpm.yaml --packager "$format" --target "out/${{ matrix.arch }}/stalelink-${version}-${{ matrix.arch }}.${extension}"
-          done
+          source packaging/scripts/nfpm-lib.sh
+          build_nfpm_packages nfpm packaging/nfpm.yaml "$binary" "out/${{ matrix.arch }}" "$version" "${{ matrix.arch }}"
           sha256sum "out/${{ matrix.arch }}"/* > "out/stalelink-${version}-${{ matrix.arch }}-linux-packages.sha256"
           gh release upload "$TAG" "out/${{ matrix.arch }}"/* "out/stalelink-${version}-${{ matrix.arch }}-linux-packages.sha256" --clobber

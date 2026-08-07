@@ -68,6 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           bash packaging/scripts/test-channels.sh
+      - name: Audit workflow action pins
+        run: bash packaging/scripts/audit-workflow-action-shas.sh
       - name: Install verified nFPM
         run: |
           set -euo pipefail

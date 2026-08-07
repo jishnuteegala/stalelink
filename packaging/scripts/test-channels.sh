@@ -20,11 +20,6 @@ trap 'rm -rf "$tmp"' EXIT
 x64=stalelink-x86_64-pc-windows-msvc.zip
 arm64=stalelink-aarch64-pc-windows-msvc.zip
 render_scoop_manifest "$tmp/stalelink.json" 0.1.0 "https://example.test/$x64" "$(require_release_checksum "$checksum_fixture" "$x64")" "https://example.test/$arm64" "$(require_release_checksum "$checksum_fixture" "$arm64")"
-node - "$tmp/stalelink.json" <<'NODE'
-const manifest = require(process.argv[2]);
-for (const architecture of ["64bit", "arm64"]) {
-  if (!manifest.architecture[architecture] || !/^[a-f0-9]{64}$/.test(manifest.architecture[architecture].hash)) process.exit(1);
-}
-NODE
+node "$root/packaging/scripts/validate-scoop-manifest.js" "$tmp/stalelink.json"
 render_pkgbuild "$root/packaging/aur/PKGBUILD.template" "$tmp/PKGBUILD" 0.1.0 "$(require_release_checksum "$checksum_fixture" stalelink-x86_64-unknown-linux-gnu.tar.xz)"
 bash -n "$tmp/PKGBUILD"

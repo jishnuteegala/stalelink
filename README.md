@@ -24,7 +24,7 @@ The first tagged release (`v0.1.0`) activates the package-manager channels below
 | Debian / Ubuntu | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.deb; sudo dpkg -i stalelink-${v#v}-amd64.deb` (ARM64: replace `amd64` with `arm64`) |
 | Fedora / RHEL | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.rpm; sudo rpm -i stalelink-${v#v}-amd64.rpm` (ARM64: replace `amd64` with `arm64`) |
 | Alpine | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.apk; sudo apk add --allow-untrusted stalelink-${v#v}-amd64.apk` (ARM64: replace `amd64` with `arm64`) |
-| Arch package | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.archlinux; sudo pacman -U stalelink-${v#v}-amd64.archlinux` (ARM64: replace `amd64` with `arm64`) |
+| Arch package | `v=$(curl -LsSf https://api.github.com/repos/jishnuteegala/stalelink/releases/latest | jq -r .tag_name); curl -LO https://github.com/jishnuteegala/stalelink/releases/download/$v/stalelink-${v#v}-amd64.pkg.tar.zst; sudo pacman -U stalelink-${v#v}-amd64.pkg.tar.zst` (ARM64: replace `amd64` with `arm64`) |
 | AUR | `yay -S stalelink-bin` (available from v0.1.0) |
 | Source | `cargo install --path crates/stalelink` |
 
