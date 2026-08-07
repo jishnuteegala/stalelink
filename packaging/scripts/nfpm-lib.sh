@@ -7,6 +7,14 @@ nfpm_arches() {
   printf '%s\n' amd64 arm64
 }
 
+nfpm_target_for_arch() {
+  case "$1" in
+    amd64) printf '%s\n' x86_64-unknown-linux-gnu ;;
+    arm64) printf '%s\n' aarch64-unknown-linux-gnu ;;
+    *) printf 'unknown nFPM arch: %s\n' "$1" >&2; return 1 ;;
+  esac
+}
+
 nfpm_formats() {
   printf '%s\n' deb rpm apk archlinux
 }
