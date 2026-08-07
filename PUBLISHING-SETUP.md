@@ -113,8 +113,17 @@ installable: validation, scanning, and moderation follow.
 ### crates.io
 
 `CARGO_REGISTRY_TOKEN` is a crates.io API token with publish authority for
-`stalelink-core` and `stalelink`. Restrict its scope to the minimum available
-publish authority and rotate it through the crates.io account controls.
+`stalelink-core` and `stalelink`. Create it at
+<https://crates.io/settings/tokens/new> with exactly these values:
+
+| Field | Value |
+| --- | --- |
+| Name | `stalelink-release` |
+| Expiration | 90 days (add a rotation reminder; see [rotation](#credential-rotation-and-incident-response)) |
+| Scopes | `publish-new` and `publish-update` only (the first release publishes both crates as new; later releases are updates) |
+| Crates | The pattern `stalelink*`, not Unrestricted (matches `stalelink-core` and `stalelink`, including before first publication) |
+
+Do not grant `change-owners`, `yank`, or `trusted-publishing`.
 
 ## Setting secrets
 
