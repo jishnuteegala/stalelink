@@ -50,7 +50,7 @@ jobs:
           version="${TAG#v}"
           archive="stalelink-${{ matrix.target }}.tar.xz"
           test -f "artifacts/$archive"
-          mkdir unpack "out/${{ matrix.arch }}"
+          mkdir -p unpack "out/${{ matrix.arch }}"
           tar -xJf "artifacts/$archive" -C unpack
           binary="$(find unpack -type f -name stalelink -print -quit)"
           test -n "$binary"
