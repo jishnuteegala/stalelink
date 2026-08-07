@@ -27,8 +27,11 @@ Bootstrap the sole cargo-dist npm package before merging the first release PR:
 
 ```sh
 gh api repos/jishnuteegala/.github/contents/scripts/npm-oidc-bootstrap.sh --jq .content | base64 -d > npm-oidc-bootstrap.sh
-bash npm-oidc-bootstrap.sh all --repo jishnuteegala/stalelink --workflow release.yml stalelink
+bash npm-oidc-bootstrap.sh all --repo jishnuteegala/stalelink --workflow release.yml @jishnuteegala/stalelink
 ```
+
+The package is the scoped `@jishnuteegala/stalelink`: npm rejects the unscoped
+name as too similar to the existing `stylelint` package (E403).
 
 The central script publishes a `0.0.0` placeholder under the `bootstrap` tag,
 configures trusted publishing, locks publishing to 2FA, and verifies the result.
@@ -62,14 +65,14 @@ Set publishing access to require 2FA and disallow tokens; OIDC trusted
 publishing is unaffected:
 
 ```sh
-npm access set mfa=publish stalelink
+npm access set mfa=publish @jishnuteegala/stalelink
 ```
 
 After every release, verify npm provenance:
 
 ```sh
 version=0.1.0
-npm view "stalelink@$version" --json dist.attestations \
+npm view "@jishnuteegala/stalelink@$version" --json dist.attestations \
   | node -e 'const a=JSON.parse(require("fs").readFileSync(0,"utf8"));process.exit(a&&a.provenance?0:1)' \
   && echo 'stalelink: provenance OK' || echo 'stalelink: NO PROVENANCE'
 ```
@@ -152,7 +155,7 @@ After every release:
 
 1. Confirm the **Release** workflow completed.
 2. Confirm GitHub release assets match `sha256.sum`.
-3. Confirm `stalelink` exists on npm and its provenance is linked to this repository.
+3. Confirm `@jishnuteegala/stalelink` exists on npm and its provenance is linked to this repository.
 4. Confirm the Homebrew formula and Scoop manifest reference the released version.
 5. Confirm the WinGet PR is open or merged and its validation checks pass.
 6. Confirm the AUR package version, source checksum, and `git` dependency.

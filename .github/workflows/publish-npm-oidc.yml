@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           mkdir package
           tar -xzf artifacts/stalelink-npm-package.tar.gz -C package
-          test "$(node -p "require('./package/package.json').name")" = stalelink
+          test "$(node -p "require('./package/package.json').name")" = @jishnuteegala/stalelink
           cd package/package
           set +e
           npm publish --provenance 2>&1 | tee "$RUNNER_TEMP/npm-publish.log"
