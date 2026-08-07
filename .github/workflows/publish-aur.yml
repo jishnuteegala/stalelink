@@ -6,6 +6,14 @@ on:
       plan:
         required: true
         type: string
+  # Allows re-publishing a single channel without re-running the whole
+  # release pipeline (which is not idempotent past announce).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v0.1.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -25,7 +33,7 @@ jobs:
     if: needs.credentials.outputs.available == 'true'
     runs-on: ubuntu-22.04
     env:
-      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
       AUR_KEY: ${{ secrets.AUR_KEY }}
       GH_TOKEN: ${{ github.token }}
     steps:

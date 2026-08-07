@@ -25,7 +25,9 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
+            # Draft (normal mid-pipeline state) or already published (re-run
+            # after a successful announce) both mean there is nothing to create.
+            echo "release $TAG already exists (draft: $(gh release view "$TAG" --json isDraft --jq .isDraft))"
           else
             printf '%s\n' "$BODY" > notes.md
             gh release create "$TAG" --draft --title "$TITLE" --notes-file notes.md
