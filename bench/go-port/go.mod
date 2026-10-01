@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/pdfcpu/pdfcpu v0.11.1
-	github.com/yuin/goldmark v1.8.5
+	github.com/yuin/goldmark v1.8.6
 	golang.org/x/net v0.57.0
 )
 
