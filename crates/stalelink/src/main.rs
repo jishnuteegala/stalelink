@@ -34,7 +34,7 @@ const ENVIRONMENT: u8 = 3;
 #[command(
     name = "stalelink",
     version,
-    about = "Find stale links in local documents"
+    about = "Find dead and outdated links in local documents"
 )]
 #[command(after_help = "Examples:\n  stalelink scan docs/\n  stalelink fix report.md --write")]
 struct Cli {

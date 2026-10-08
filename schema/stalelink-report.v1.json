@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://stalelink.dev/schema/stalelink-report.v1.json",
+  "$id": "https://raw.githubusercontent.com/jishnuteegala/stalelink/main/schema/stalelink-report.v1.json",
   "title": "stalelink report v1",
   "type": "object",
   "required": ["schema_version", "run", "findings"],

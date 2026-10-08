@@ -1,4 +1,4 @@
-# Parse Benchmark Receipts
+# Parse benchmark receipts
 
 These are language-decision receipts for brief decision 18. They compare local
 document parsing and link extraction only, not walking, checking, reporting, or
@@ -81,7 +81,7 @@ memory counter through `GetProcessMemoryInfo` after exit. The reported value is
 | PPTX | `zip` plus `quick-xml` | presentation-order slide relationships plus streaming XML | URL and slide location |
 | PDF | `lopdf` pages, annotations, and content streams | pdfcpu xref/page model, annotations, decoded content | URL, page, and annotation location |
 
-## Coverage Delta
+## Coverage delta
 
 | Production behavior | Benchmark treatment |
 | --- | --- |
