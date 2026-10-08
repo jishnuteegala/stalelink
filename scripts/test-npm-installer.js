@@ -82,11 +82,14 @@ async function main() {
   const installer = path.join(root, "target", "distrib", "stalelink-npm-package.tar.gz");
   run("tar", [...tarLocalFlags, "-xzf", tarPath(installer), "-C", tarPath(temp)]);
   // `npm_execpath` is npm's JS CLI under `npm test` but a native binary under
-  // pnpm; fall back to npm's bundled CLI whenever it is not a .js file.
+  // pnpm (or yarn's yarn.js); only trust it when it is literally npm-cli.js.
   const npmExec = process.env.npm_execpath;
-  const npmCli = npmExec && npmExec.endsWith(".js")
+  const npmCli = npmExec && path.basename(npmExec) === "npm-cli.js"
     ? npmExec
     : path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (!fs.existsSync(npmCli)) {
+    throw new Error(`npm's bundled CLI not found at ${npmCli}; install npm alongside Node or run under npm test`);
+  }
   run(process.execPath, [npmCli, "pack", "--dry-run"], { cwd: packageDir });
 
   // The generated package needs no network dependency for this controlled smoke.

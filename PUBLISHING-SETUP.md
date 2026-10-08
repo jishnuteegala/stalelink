@@ -11,7 +11,7 @@ safe to keep under version control.
 | GitHub Releases | `GITHUB_TOKEN` | `v0.1.0` is published with all assets. |
 | npm | Trusted publishing (OIDC), no stored secret | `@jishnuteegala/stalelink` is published at `0.1.0` with provenance; the `0.0.0` bootstrap placeholder remains under the `bootstrap` tag. |
 | Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | The Homebrew formula is live in `jishnuteegala/homebrew-tap`. The Scoop manifest was pushed to the bucket root instead of `bucket/`, so `scoop install` cannot see it; fix the publish step and move the file. |
-| WinGet | `WINGET_GITHUB_TOKEN` | `jishnuteegala.stalelink` is not in `microsoft/winget-pkgs`. The first manifest needs an interactive `komac new` submission; the workflow only submits updates for existing packages. |
+| WinGet | `WINGET_GITHUB_TOKEN` | `jishnuteegala.stalelink` is not in `microsoft/winget-pkgs`. The first manifest needs an interactive `komac new` submission or a manual manifest PR to `microsoft/winget-pkgs`; the workflow only submits updates for existing packages. |
 | AUR | `AUR_KEY` | `stalelink-bin` is not published. The first push attempt hit AUR maintenance downtime; rerun **Publish AUR package** with tag `v0.1.0` to retry. |
 | Chocolatey | `CHOCOLATEY_API_KEY` | Submitted, awaiting moderation. |
 | crates.io | `CARGO_REGISTRY_TOKEN` | `stalelink-core` and `stalelink` are published at `0.1.0`. |
@@ -23,9 +23,8 @@ single-use publish credential. It requires Node 22.14 or newer, npm 11.5.1 or
 newer, a GitHub-hosted runner, and `id-token: write`. The publish job already
 uses Node 24, npm 12, and the required permission.
 
-The steps below record the one-time bootstrap, kept for reference if the
-package ever needs to be re-created.
-It is already done for `v0.1.0`.
+The steps below record the one-time bootstrap, kept for reference if the package ever needs to be re-created.
+It was completed for `v0.1.0`; every step in this section is done.
 
 Bootstrap the sole cargo-dist npm package before merging the first release PR:
 

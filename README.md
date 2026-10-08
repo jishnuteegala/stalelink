@@ -152,7 +152,12 @@ The JSON schema is [`schema/stalelink-report.v1.json`](schema/stalelink-report.v
 
 ## Release channels
 
-Releases are draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, with checksums, shell/PowerShell installers, cargo-dist's generated `stalelink` npm installer, a Homebrew tap, Scoop, nFPM Linux packages, AUR, WinGet, and Chocolatey. `release-plz` maintains the human-reviewed release PR. On merge it publishes `stalelink-core` then `stalelink` to crates.io, creates the version tag, and dispatches cargo-dist. Cargo-dist creates the draft and uploads artifacts; Homebrew and nFPM complete before cargo-dist undrafts it. Scoop, AUR, WinGet, and Chocolatey then use the public release URLs. Optional credential-backed channels skip when their secrets are absent.
+Releases are draft-first GitHub Releases for macOS, Linux, and Windows on x64 and ARM64, with checksums, shell/PowerShell installers, cargo-dist's generated `stalelink` npm installer, a Homebrew tap, Scoop, nFPM Linux packages, AUR, WinGet, and Chocolatey.
+`release-plz` maintains the human-reviewed release PR.
+On merge it publishes `stalelink-core` then `stalelink` to crates.io, creates the version tag, and dispatches cargo-dist.
+Cargo-dist creates the draft and uploads artifacts; Homebrew and nFPM complete before cargo-dist undrafts it.
+Scoop, AUR, WinGet, and Chocolatey then use the public release URLs.
+Optional credential-backed channels skip when their secrets are absent.
 
 ## License
 
