@@ -26,9 +26,12 @@ npm install -g @jishnuteegala/stalelink
 
 # Homebrew (macOS / Linux)
 brew install jishnuteegala/tap/stalelink
+
+# Chocolatey (Windows)
+choco install stalelink
 ```
 
-The Scoop, WinGet, Chocolatey, and AUR channels are built into the release pipeline but are not published yet (Chocolatey is submitted and awaiting moderation).
+The Scoop, WinGet, and AUR channels are built into the release pipeline but are not published yet.
 
 ### Linux packages
 

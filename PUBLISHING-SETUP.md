@@ -13,7 +13,7 @@ safe to keep under version control.
 | Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | The Homebrew formula is live in `jishnuteegala/homebrew-tap`. The Scoop manifest was pushed to the bucket root instead of `bucket/`, so `scoop install` cannot see it; fix the publish step and move the file. |
 | WinGet | `WINGET_GITHUB_TOKEN` | `jishnuteegala.stalelink` is not in `microsoft/winget-pkgs`. The first manifest needs an interactive `komac new` submission or a manual manifest PR to `microsoft/winget-pkgs`; the workflow only submits updates for existing packages. |
 | AUR | `AUR_KEY` | `stalelink-bin` is not published. The first push attempt hit AUR maintenance downtime; rerun **Publish AUR package** with tag `v0.1.0` to retry. |
-| Chocolatey | `CHOCOLATEY_API_KEY` | Submitted, awaiting moderation. |
+| Chocolatey | `CHOCOLATEY_API_KEY` | `stalelink` `0.1.0` is approved and live on community.chocolatey.org. |
 | crates.io | `CARGO_REGISTRY_TOKEN` | `stalelink-core` and `stalelink` are published at `0.1.0`. |
 
 ## npm trusted publishing

@@ -84,9 +84,12 @@ async function main() {
   // `npm_execpath` is npm's JS CLI under `npm test` but points at pnpm (a
   // binary or pnpm.cjs) or yarn's yarn.js; only trust it when it is literally npm-cli.js.
   const npmExec = process.env.npm_execpath;
+  const npmPrefix = process.platform === "win32"
+    ? path.dirname(process.execPath)
+    : path.join(path.dirname(process.execPath), "..", "lib");
   const npmCli = npmExec && path.basename(npmExec) === "npm-cli.js"
     ? npmExec
-    : path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    : path.join(npmPrefix, "node_modules", "npm", "bin", "npm-cli.js");
   if (!fs.existsSync(npmCli)) {
     throw new Error(`npm's bundled CLI not found at ${npmCli}; install npm alongside Node or run under npm test`);
   }
