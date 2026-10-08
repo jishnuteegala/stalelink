@@ -81,9 +81,12 @@ async function main() {
   run("dist", ["build", "--artifacts=global", "--output-format=json"], { cwd: root });
   const installer = path.join(root, "target", "distrib", "stalelink-npm-package.tar.gz");
   run("tar", [...tarLocalFlags, "-xzf", tarPath(installer), "-C", tarPath(temp)]);
-  // `npm_execpath` exists under `npm test`; otherwise find npm's bundled CLI
-  // from the running Node installation so the direct release-gate command works.
-  const npmCli = process.env.npm_execpath || path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  // `npm_execpath` is npm's JS CLI under `npm test` but a native binary under
+  // pnpm; fall back to npm's bundled CLI whenever it is not a .js file.
+  const npmExec = process.env.npm_execpath;
+  const npmCli = npmExec && npmExec.endsWith(".js")
+    ? npmExec
+    : path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
   run(process.execPath, [npmCli, "pack", "--dry-run"], { cwd: packageDir });
 
   // The generated package needs no network dependency for this controlled smoke.

@@ -8,13 +8,13 @@ safe to keep under version control.
 
 | Channel | Credential | External state |
 | --- | --- | --- |
-| GitHub Releases | `GITHUB_TOKEN` | Workflow is ready; the first release is pending. |
-| npm | Trusted publishing (OIDC), no stored secret | Not bootstrapped; complete [npm trusted publishing](#npm-trusted-publishing) before the first release. |
-| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | `jishnuteegala/homebrew-tap` and `jishnuteegala/scoop-bucket` exist; no stalelink manifest is published yet. Complete the [credential setup](#channel-credentials). |
-| WinGet | `WINGET_GITHUB_TOKEN` | The `jishnuteegala/winget-pkgs` fork exists; no stalelink manifest is submitted yet. Complete the [credential setup](#channel-credentials). |
-| AUR | `AUR_KEY` | `stalelink-bin` is not published; complete the [AUR setup](#aur) and add its secret. |
-| Chocolatey | `CHOCOLATEY_API_KEY` | No package has been submitted; complete the [Chocolatey setup](#chocolatey) and add its secret. |
-| crates.io | `CARGO_REGISTRY_TOKEN` | Not published; add the token during [credential setup](#setting-secrets) before the first release. |
+| GitHub Releases | `GITHUB_TOKEN` | `v0.1.0` is published with all assets. |
+| npm | Trusted publishing (OIDC), no stored secret | `@jishnuteegala/stalelink` is published at `0.1.0` with provenance; the `0.0.0` bootstrap placeholder remains under the `bootstrap` tag. |
+| Homebrew and Scoop | `PACKAGES_GITHUB_TOKEN` | The Homebrew formula is live in `jishnuteegala/homebrew-tap`. The Scoop manifest was pushed to the bucket root instead of `bucket/`, so `scoop install` cannot see it; fix the publish step and move the file. |
+| WinGet | `WINGET_GITHUB_TOKEN` | `jishnuteegala.stalelink` is not in `microsoft/winget-pkgs`. The first manifest needs an interactive `komac new` submission; the workflow only submits updates for existing packages. |
+| AUR | `AUR_KEY` | `stalelink-bin` is not published. The first push attempt hit AUR maintenance downtime; rerun **Publish AUR package** with tag `v0.1.0` to retry. |
+| Chocolatey | `CHOCOLATEY_API_KEY` | Submitted, awaiting moderation. |
+| crates.io | `CARGO_REGISTRY_TOKEN` | `stalelink-core` and `stalelink` are published at `0.1.0`. |
 
 ## npm trusted publishing
 
@@ -22,6 +22,10 @@ npm trusted publishing exchanges GitHub's short-lived OIDC identity for a
 single-use publish credential. It requires Node 22.14 or newer, npm 11.5.1 or
 newer, a GitHub-hosted runner, and `id-token: write`. The publish job already
 uses Node 24, npm 12, and the required permission.
+
+The steps below record the one-time bootstrap, kept for reference if the
+package ever needs to be re-created.
+It is already done for `v0.1.0`.
 
 Bootstrap the sole cargo-dist npm package before merging the first release PR:
 
@@ -187,14 +191,18 @@ credential at its provider.
 ## Repository controls
 
 - Keep default workflow permissions read-only.
-- Prevent Actions from approving pull requests.
+- Keep "GitHub Actions can create and approve pull requests" enabled: the
+  bundled switch is what lets `release-plz` open release PRs under the
+  built-in `GITHUB_TOKEN`.
 - Require maintainer approval before workflows from external forks run.
 - Require CI and release checks on `main`.
-- Protect immutable `v*` tags.
+- Protect immutable `v*` tags and keep repository-level immutable releases on.
 - Allow only GitHub-owned actions and explicitly approved third-party actions,
   enforcing full-SHA pinning in repository settings.
 - Keep PR CI on `pull_request` with read-only permissions and no secrets.
   Never check out fork code from `pull_request_target` or a privileged
   `workflow_run`.
-- Keep CodeQL default setup enabled for Rust, JavaScript, and Actions.
+- Keep CodeQL default setup enabled for Actions, Go, and JavaScript/TypeScript.
+  Default setup has no Rust language option; `cargo lint` and the test gate
+  cover Rust.
 - Keep publishing credentials in GitHub Actions secrets, never in this file.

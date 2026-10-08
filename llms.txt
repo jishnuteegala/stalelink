@@ -13,7 +13,7 @@ License: MIT
 
 ## Documentation
 
-- [Domain context](CONTEXT.md)
+- [Benchmark receipts](docs/benchmarks.md)
 - [Agent documentation](docs/agents/)
 
 No telemetry is collected. Requested link checks make network requests and their verdicts are cached locally unless `--no-cache` is used.

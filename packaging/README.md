@@ -1,4 +1,4 @@
-# Packaging Automation
+# Packaging automation
 
 `nfpm.yaml` packages the cargo-dist Linux archives into deb, rpm, apk, and Arch
 artifacts for x64 and ARM64 in `publish-nfpm.yml`. `aur/PKGBUILD.template` and

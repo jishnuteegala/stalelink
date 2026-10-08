@@ -1,4 +1,4 @@
-# Benchmark Receipts
+# Benchmark receipts
 
 This directory contains the manual, reproducible language-decision benchmark
 for issue #25. It is not part of the Cargo workspace, release artifacts, or CI.
