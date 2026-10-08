@@ -81,8 +81,8 @@ async function main() {
   run("dist", ["build", "--artifacts=global", "--output-format=json"], { cwd: root });
   const installer = path.join(root, "target", "distrib", "stalelink-npm-package.tar.gz");
   run("tar", [...tarLocalFlags, "-xzf", tarPath(installer), "-C", tarPath(temp)]);
-  // `npm_execpath` is npm's JS CLI under `npm test` but a native binary under
-  // pnpm (or yarn's yarn.js); only trust it when it is literally npm-cli.js.
+  // `npm_execpath` is npm's JS CLI under `npm test` but points at pnpm (a
+  // binary or pnpm.cjs) or yarn's yarn.js; only trust it when it is literally npm-cli.js.
   const npmExec = process.env.npm_execpath;
   const npmCli = npmExec && path.basename(npmExec) === "npm-cli.js"
     ? npmExec

@@ -125,7 +125,7 @@ installable: validation, scanning, and moderation follow.
 | Field | Value |
 | --- | --- |
 | Name | `stalelink-release` |
-| Expiration | 90 days (add a rotation reminder; see [rotation](#credential-rotation-and-incident-response)) |
+| Expiration | 90 days (add a rotation reminder; see [rotation](#rotation-and-incident-response)) |
 | Scopes | `publish-new` and `publish-update` only (the first release publishes both crates as new; later releases are updates) |
 | Crates | The pattern `stalelink*`, not Unrestricted (matches `stalelink-core` and `stalelink`, including before first publication) |
 
