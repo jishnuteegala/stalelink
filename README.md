@@ -6,7 +6,8 @@
 
 Your documents still link to pages that have disappeared, moved, require a login, or quietly became obsolete. `stalelink` checks local PDF, Word, Excel, PowerPoint, Markdown, HTML, and text files and reports broken links before they become support tickets or a failed audit.
 
-It is fully local and collects no telemetry. It makes network requests only to check links you asked it to scan, and caches verdicts locally unless you choose `--no-cache`.
+It is fully local and collects no telemetry.
+It makes network requests only to check links you asked it to scan, and caches verdicts locally unless you choose `--no-cache`.
 
 ## Install
 
@@ -48,9 +49,12 @@ curl -LO "https://github.com/jishnuteegala/stalelink/releases/download/v${VERSIO
 sudo apk add --allow-untrusted "stalelink-${VERSION}-amd64.apk"
 ```
 
-`.pkg.tar.zst` (Arch) packages are also attached to each [release](https://github.com/jishnuteegala/stalelink/releases). Manual installs do not update themselves, so use Homebrew, npm, or a package manager channel when you want upgrades handled for you.
+`.pkg.tar.zst` (Arch) packages are also attached to each [release](https://github.com/jishnuteegala/stalelink/releases).
+Manual installs do not update themselves, so use Homebrew, npm, or a package manager channel when you want upgrades handled for you.
 
-Prebuilt binary archives are also on the Releases page. The build matrix covers Linux, macOS, and Windows on x86_64 + aarch64. Each release contains these checksummed payloads (replace `${VERSION}` with the release version):
+Prebuilt binary archives are also on the Releases page.
+The build matrix covers Linux, macOS, and Windows on x86_64 + aarch64.
+Each release contains these checksummed payloads (replace `${VERSION}` with the release version):
 
 ```text
 stalelink-x86_64-unknown-linux-gnu.tar.xz
@@ -78,7 +82,11 @@ $ stalelink scan --format json docs/ > report.json
 $ stalelink scan --format sarif docs/ -o stalelink.sarif
 ```
 
-The default table, JSON, and SARIF outputs contain only findings on stdout. Diagnostics, progress, cookie notices, and repeatable `-v` traces go to stderr. `--quiet` suppresses progress and traces. `--color auto|always|never` controls colored fix diffs. `auto` turns color off for non-terminals and honors `NO_COLOR`.
+The default table, JSON, and SARIF outputs contain only findings on stdout.
+Diagnostics, progress, cookie notices, and repeatable `-v` traces go to stderr.
+`--quiet` suppresses progress and traces.
+`--color auto|always|never` controls colored fix diffs.
+`auto` turns color off for non-terminals and honors `NO_COLOR`.
 
 Common errors are actionable:
 
