@@ -24,7 +24,7 @@ newer, a GitHub-hosted runner, and `id-token: write`. The publish job already
 uses Node 24, npm 12, and the required permission.
 
 The steps below record the one-time bootstrap, kept for reference if the package ever needs to be re-created.
-It was completed for `v0.1.0`; every step in this section is done.
+It was completed for `v0.1.0`; the one-time bootstrap steps are done, while the provenance check below still applies to each release.
 
 Bootstrap the sole cargo-dist npm package before merging the first release PR:
 
@@ -201,7 +201,7 @@ credential at its provider.
 - Keep PR CI on `pull_request` with read-only permissions and no secrets.
   Never check out fork code from `pull_request_target` or a privileged
   `workflow_run`.
-- Keep CodeQL default setup enabled for Actions, Go, and JavaScript/TypeScript.
-  Default setup has no Rust language option; `cargo lint` and the test gate
-  cover Rust.
+- Keep CodeQL default setup enabled for Actions, Go, and JavaScript/TypeScript
+  (the languages enabled today). Rust may also be selectable in
+  Settings > Code security; the REST language list does not accept `rust`.
 - Keep publishing credentials in GitHub Actions secrets, never in this file.
