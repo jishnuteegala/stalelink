@@ -4,7 +4,7 @@ mod config;
 mod output;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     fs::File,
     io::{self, IsTerminal, Read, Write},
@@ -766,7 +766,7 @@ fn run_fix(args: FixArgs, quiet: bool, verbose: u8, color: Color) -> ExitCode {
         preflight_pdfs(&report.resolved_paths)
     };
     let mut refused = preflight.len();
-    let preflight_refused: std::collections::HashSet<PathBuf> = preflight
+    let preflight_refused: HashSet<PathBuf> = preflight
         .into_iter()
         .map(|(path, error)| {
             eprintln!("refused {}: {error}", path.display());

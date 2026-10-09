@@ -22,8 +22,8 @@ recipe.
 
 - Start every recipe from the baseline unless its preconditions say otherwise.
 - Drive with the subcommand and long flags exactly as written; exit codes are
-  part of the contract: 0 clean, 1 findings or failure, 2 usage error, 3
-  environment/execution failure.
+  part of the contract: 0 clean (or all fixes applied), 1 findings reported or
+  fix work refused/failed, 2 usage error, 3 environment/execution failure.
 - Use `--format json` when a recipe needs machine-checkable output and `-o`
   when it needs a written artifact; `--no-cache` whenever caching is not the
   feature under test.

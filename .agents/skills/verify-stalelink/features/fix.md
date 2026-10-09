@@ -11,14 +11,17 @@ copies (`--copy`).
   nothing.
 - `fix-write` applies rewrites at or above `--min-fix-confidence` to the
   source files.
-- `fix-backup` leaves `<name>.bak` alongside a written file.
+- `fix-backup` leaves a `<name>.<ext>.bak` sibling alongside a written file
+  (e.g. `guide.md.bak`).
 - `fix-copy` writes `*.fixed.*` siblings instead of mutating the original.
 - `fix-verify` re-reads and re-checks written targets after a write.
 
 ## How to get to it (user POV)
 
 - Run `stalelink fix <path>` to preview.
-- Run `stalelink fix --write [--backup|--copy] <path>` to apply.
+- Run `stalelink fix --write [--backup] <path>` to rewrite files in place, or
+  `stalelink fix --copy <path>` to write `*.fixed.*` siblings.
+  `--write` and `--copy` conflict; pick one.
 
 ## Driving it with the shell
 
@@ -57,7 +60,8 @@ Preconditions:
   as manual-fix or refused entries, not diffs.
 - The written target is re-verified after a write (`fix-verify`), so a second
   scan is the honest confirmation that a rewrite stuck.
-- `--copy` without `--write` still produces preview output only; the flag
-  matters on the write path.
+- `--copy` is a write mode, not a preview modifier: `stalelink fix --copy
+  <path>` creates `*.fixed.*` files with no `--write`, and clap rejects
+  `--write --copy` together (exit 2).
 - Backup files (`*.bak`) inside the scanned tree get re-scanned; keep
   evidence copies outside `scratch/`.

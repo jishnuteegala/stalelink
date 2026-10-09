@@ -57,7 +57,8 @@ Preconditions:
 - Glob and exclude flags (`--include`, `--exclude`, `--exclude-url`,
   `--exclude-domain`) shrink the corpus silently; an unexpectedly empty report
   usually means an over-broad exclusion rather than clean documents.
-- `--auth` tiers above `off` touch real browser state; verification drives
-  stay on `--auth off` (the default) and treat browser tiers as untested.
+- `--auth` tiers above `off` touch real browser state, and the configured
+  default is `cookies` - drives that must stay offline must pass `--auth off`
+  explicitly and treat browser tiers as untested.
 - stdout carries findings while stderr carries progress/diagnostics; capture
   both or a `-q` run can look like it produced nothing.

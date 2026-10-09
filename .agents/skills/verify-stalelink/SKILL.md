@@ -60,8 +60,9 @@ the build or checkout is broken; do not drive.
 - Pass `--no-cache` on drives that do not test caching, and `STALELINK_CACHE_DIR`
   on ones that do.
 - Capture each invocation's stdout, stderr, and exit code as it happens; exit
-  codes are part of the contract (0 = clean, 1 = findings/failure, 2 = usage,
-  3 = environment/execution failure).
+  codes are part of the contract: 0 clean (or all fixes applied), 1 findings
+  reported or fix work refused/failed, 2 usage error, 3 environment/execution
+  failure.
 
 ## Evidence
 

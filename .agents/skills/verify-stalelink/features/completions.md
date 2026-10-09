@@ -1,8 +1,8 @@
 # Shell completions
 
-Comprints shell completion scripts for bash, zsh, fish, and PowerShell on
-stdout, so users can wire tab-completion for `stalelink` subcommands, flags,
-and arguments into their shell.
+Prints shell completion scripts for bash, zsh, fish, PowerShell, and elvish
+on stdout, so users can wire tab-completion for `stalelink` subcommands,
+flags, and arguments into their shell.
 
 ## Sub-features
 
@@ -10,6 +10,7 @@ and arguments into their shell.
 - `completions-zsh` emits a zsh completion script.
 - `completions-fish` emits a fish completion script.
 - `completions-powershell` emits a PowerShell completion script.
+- `completions-elvish` emits an elvish completion script.
 
 ## How to get to it (user POV)
 
@@ -24,8 +25,8 @@ Preconditions:
 - `RUN_DIR/evidence/` exists for the emitted scripts.
 
 - **Each shell.** Run `stalelink completions bash > evidence/comp.bash` (and
-  likewise `zsh`, `fish`, `powershell`). Each invocation exits 0 and writes a
-  non-empty script that mentions `stalelink`.
+  likewise `zsh`, `fish`, `powershell`, `elvish`). Each invocation exits 0 and
+  writes a non-empty script that mentions `stalelink`.
 - **Sanity.** The emitted scripts reference the binary name and its
   subcommands; an empty or erroring output invalidates the drive.
 - **Invalid shell.** Run `stalelink completions tcsh`; clap rejects it with a
