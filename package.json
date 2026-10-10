@@ -2,6 +2,11 @@
   "name": "stalelink-release-checks",
   "private": true,
   "scripts": {
-    "test": "node scripts/test-npm-installer.js"
+    "test": "node scripts/test-npm-installer.js",
+    "site:dev": "wrangler dev --assets site",
+    "site:deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
   }
 }

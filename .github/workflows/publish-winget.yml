@@ -45,6 +45,9 @@ jobs:
           & "$env:RUNNER_TEMP\komac.exe" --version
       - name: Submit manifest pull request
         shell: pwsh
+        # komac update regenerates the manifest from the previous version, so
+        # metadata like PrivacyUrl set on the winget-pkgs manifest persists
+        # across releases; there is no in-repo template to keep in sync.
         run: |
           $version = $env:TAG.Substring(1)
           $x64Url = "https://github.com/jishnuteegala/stalelink/releases/download/$env:TAG/stalelink-x86_64-pc-windows-msvc.zip"

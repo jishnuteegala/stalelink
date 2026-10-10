@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy - stalelink</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; color: #1c1917; }
+  h1 { font-size: 1.6rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  code { background: #f5f5f4; padding: 0.1rem 0.3rem; border-radius: 4px; }
+  a { color: #1d4ed8; }
+</style>
+</head>
+<body>
+<h1>Privacy statement - stalelink</h1>
+<p>Last updated: 2026-10-10. This statement covers the <code>stalelink</code> command-line
+tool (<a href="https://github.com/jishnuteegala/stalelink">source</a>).</p>
+
+<h2>What stalelink does</h2>
+<p>stalelink reads documents you point it at on your local disk (PDF, DOCX, XLSX,
+PPTX, Markdown, HTML, and plain text), extracts links from them, and checks
+whether those links are alive. It is a local tool: document contents never leave
+your machine.</p>
+
+<h2>Document-derived link targets</h2>
+<p>For every link found in a document, stalelink issues an HTTP(S) request to that
+link's URL (HEAD first, GET where needed) to determine its status. The only data
+sent to those hosts is the URL request itself plus the configured User-Agent
+header. No document content, file names, or directory structure is transmitted.</p>
+
+<h2>Authentication modes, browser credentials, and cookie access</h2>
+<p>Link checks run in one of three authentication tiers, controlled by
+<code>--auth off|cookies|browser</code>:</p>
+<ul>
+<li><b>off</b> sends plain unauthenticated requests.</li>
+<li><b>cookies</b> (the configured default) reads your installed browsers' local
+cookie stores (Chrome, Edge, Brave, Chromium, or Firefox, per
+<code>--browser</code>) so that links behind login walls can be checked.
+Matching cookies are attached as request headers only to the link's own host;
+cookie values are never sent elsewhere, logged, or persisted by stalelink.</li>
+<li><b>browser</b> launches a real browser instance (or attaches to a
+<code>--cdp-url</code> debugging endpoint you provide) to re-check hosts that
+block non-browser requests. Browser cookies and credentials stay inside the
+browser profile; stalelink does not export them.</li>
+</ul>
+<p>These credential-reading capabilities exist solely to authenticate requests to
+document-derived link targets. No credentials are transmitted to any third party.</p>
+
+<h2>Local cache</h2>
+<p>stalelink keeps a local SQLite database (<code>verdicts.sqlite3</code>) in your
+operating system's per-user cache directory (or <code>STALELINK_CACHE_DIR</code>
+when set). Each row stores a checked URL, its verdict, the check timestamp, and
+the auth tier used. The cache stays on your machine and is never uploaded.</p>
+
+<h2>Retention and deletion</h2>
+<p>Cached verdicts expire after a TTL (default or your <code>--cache-ttl</code>
+value) and are refreshed on later scans. You can bypass the cache with
+<code>--no-cache</code> and delete it entirely with <code>stalelink cache
+clear</code>. Backup files written by <code>fix --backup</code>
+(<code>&lt;name&gt;.&lt;ext&gt;.bak</code>) remain next to the originals until you
+delete them. Uninstalling stalelink does not remove the cache directory or
+backups; delete them if you want them gone.</p>
+
+<h2>What stalelink does not do</h2>
+<p>stalelink has no telemetry, analytics, crash reporting, accounts, advertising,
+or update check-ins. It makes no network requests other than the link checks
+described above (and, when <code>--auth browser</code> is used, the browser's own
+traffic under its profile). Everything it reads and writes stays local unless a
+link target you asked it to check is on the network.</p>
+
+<h2>Contact</h2>
+<p>Questions: <a href="https://github.com/jishnuteegala/stalelink/issues">GitHub
+Issues</a>.</p>
+</body>
+</html>

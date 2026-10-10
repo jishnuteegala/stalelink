@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stalelink",
+  "compatibility_date": "2026-07-20",
+  "observability": {
+    "enabled": false,
+  },
+  "assets": {
+    "directory": "site",
+    "not_found_handling": "none",
+  },
+}
