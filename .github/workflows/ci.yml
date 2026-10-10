@@ -95,7 +95,7 @@ jobs:
       - run: |
           git checkout -B release-plz-dry-run
           git branch --set-upstream-to "origin/${GITHUB_BASE_REF:-main}" release-plz-dry-run
-      - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+      - uses: MarcoIeni/release-plz-action@18641b6c63063cc5ff8786ebf69cd57e8541bae1 # v0.5
         with:
           command: release
           version: 0.3.160
