@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+### Bug Fixes
+
+- Align user-facing surfaces and release docs with shipped state ([#78](https://github.com/jishnuteegala/stalelink/pull/78))
+
+
 ### Features
 
 - Scaffold workspace, core model, CLI skeleton, and CI ([#26](https://github.com/jishnuteegala/stalelink/pull/26))
