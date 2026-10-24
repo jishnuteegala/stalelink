@@ -48,7 +48,8 @@ Preconditions:
   scratch/out.sarif scratch/docs`. `out.sarif` exists on disk and is valid
   SARIF (`version: "2.1.0"`).
 - **Fail threshold.** Run with `--fail-on dead-certain` on a fixture whose
-  only finding is `suspect`-level; exit code is 0 despite findings.
+  only finding is below `dead-certain` - e.g. a redirect link producing an
+  `OUTDATED` `PermanentRedirect` row; exit code is 0 despite findings.
 
 ## Gotchas
 

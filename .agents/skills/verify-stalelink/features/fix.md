@@ -37,8 +37,10 @@ Preconditions:
   `--min-fix-confidence outdated` (the default `dead-certain` skips them).
 
 - **Preview.** Snapshot the fixture to `evidence/fixture.before`, then run
-  `stalelink fix --no-cache scratch/fix`. stdout shows a diff hunk replacing
-  `/moved` with `/ok`; the file on disk is byte-identical to the snapshot.
+  `stalelink fix --no-cache --min-fix-confidence outdated scratch/fix`. stdout
+  shows a diff hunk replacing `/moved` with `/ok`; the file on disk is
+  byte-identical to the snapshot. Without the flag the default `dead-certain`
+  threshold filters the `outdated` redirect fix and preview prints nothing.
 - **Write.** Run `stalelink fix --no-cache --write --backup
   --min-fix-confidence outdated scratch/fix`. The fixture now points at
   `/ok`, a `.bak` sibling exists; copy the result to

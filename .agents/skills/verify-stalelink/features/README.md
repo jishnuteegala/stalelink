@@ -64,4 +64,4 @@ behavior, then exactly four H2 sections in order:
 - [Verdict cache](./cache.md) - inspect and clear the HTTP-verdict cache that
   speeds up repeated scans.
 - [Shell completions](./completions.md) - generate completion scripts for
-  bash, zsh, fish, and PowerShell.
+  bash, zsh, fish, PowerShell, and elvish.

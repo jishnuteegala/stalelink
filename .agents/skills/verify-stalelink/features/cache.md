@@ -27,10 +27,13 @@ Preconditions:
 
 - **Populate.** Run `stalelink scan scratch/docs` (no `--no-cache`) so
   verdicts are written into `scratch/cache/verdicts.sqlite3`.
-- **Stats.** Run `stalelink cache stats`. stdout reports the scratch cache
-  location and non-zero entry counts.
+- **Stats.** Run `stalelink cache stats`. stdout reports `hits`, `misses`,
+  `entries`, and `size` counters only - it never prints the cache location;
+  the dir under test is the one `STALELINK_CACHE_DIR` names.
 - **Effect.** Rescan the same fixture; the run completes without re-probing
-  the scratch server (server log shows no new requests).
+  the scratch server. The documented helper server does not log requests, so
+  the observable proof is `cache stats`: `hits` climbs while `entries` and
+  `misses` stay flat between the two scans.
 - **Clear.** Run `stalelink cache clear`, then `stalelink cache stats`.
   Stats reports an empty cache; a third scan re-probes the server.
 
