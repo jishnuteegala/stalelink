@@ -66,6 +66,9 @@ fn reason_confidence_is_total() {
     ];
     // Exhaustive match with no wildcard: adding a Reason or NetKind variant
     // fails compilation here instead of being silently skipped by `fixed`.
+    // The arm list is the coverage contract: every arm returning `true` must
+    // have a `fixed` entry (returning `true` without one would pass silently,
+    // so a new variant still needs a human to write its confidence row).
     fn coverable_in_fixed(r: &Reason) -> bool {
         match r {
             Reason::HttpStatus(_) => false, // covered by the status loop above
