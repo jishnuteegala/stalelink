@@ -58,8 +58,9 @@ Preconditions:
   `dead-certain`); redirect and version-drift fixes are `outdated`, so a
   default-confidence run previews nothing for them.
 - Only findings carrying a suggested fix (`PermanentRedirect`,
-  `VersionDrift`) are rewritable; dead links with no suggested target render
-  as manual-fix or refused entries, not diffs.
+  `VersionDrift`) are rewritable; dead links with no suggested target produce
+  no fix output at all (they appear only in `scan` reports). `refused` lines
+  appear only for whole-file preflight refusals like unfixable PDFs.
 - The written target is re-verified after a write (`fix-verify`), so a second
   scan is the honest confirmation that a rewrite stuck.
 - `--copy` is a write mode, not a preview modifier: `stalelink fix --copy

@@ -61,5 +61,6 @@ Preconditions:
 - `--auth` tiers above `off` touch real browser state, and the configured
   default is `cookies` - drives that must stay offline must pass `--auth off`
   explicitly and treat browser tiers as untested.
-- stdout carries findings while stderr carries progress/diagnostics; capture
-  both or a `-q` run can look like it produced nothing.
+- stdout carries findings while stderr carries progress/diagnostics; `-q`
+  silences stderr only, so findings still print unless `-o` was passed -
+  the nothing-on-either-stream case is `-q` + `-o`.

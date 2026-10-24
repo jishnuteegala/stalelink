@@ -40,7 +40,8 @@ Preconditions:
 ## Gotchas
 
 - Forgetting `STALELINK_CACHE_DIR` makes `stats`/`clear` operate on the real
-  platform cache; set it before any cache drive.
+  platform cache (or the `cache.dir` from a `stalelink.toml` discovered
+  upward from cwd, which claims it first); set it before any cache drive.
 - `--no-cache` bypasses both read and write, so a drive launched with it
   never populates the cache even when the cache feature itself is under test.
 - `--refresh` ignores reads but still writes; it is not a substitute for a
