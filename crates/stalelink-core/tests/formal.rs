@@ -48,7 +48,7 @@ fn reason_confidence_is_total() {
             bad.push(format!("HttpStatus({status}) -> {got:?}, want {want:?}"));
         }
     }
-    let fixed: [(Reason, Confidence); 13] = [
+    let fixed: [(Reason, Confidence); 14] = [
         (Reason::NetworkError(NetKind::Dns), LikelyDead),
         (Reason::NetworkError(NetKind::Tls), LikelyDead),
         (Reason::NetworkError(NetKind::Timeout), LikelyDead),
@@ -62,7 +62,30 @@ fn reason_confidence_is_total() {
         (Reason::FarPastLastModified, Suspect),
         (Reason::AnomalousResponse, Suspect),
         (Reason::LocalMissing, DeadCertain),
+        (Reason::SyntaxInvalid, DeadCertain),
     ];
+    // Exhaustive match with no wildcard: adding a Reason or NetKind variant
+    // fails compilation here instead of being silently skipped by `fixed`.
+    fn coverable_in_fixed(r: &Reason) -> bool {
+        match r {
+            Reason::HttpStatus(_) => false, // covered by the status loop above
+            Reason::NetworkError(NetKind::Dns)
+            | Reason::NetworkError(NetKind::Tls)
+            | Reason::NetworkError(NetKind::Timeout)
+            | Reason::NetworkError(NetKind::ConnRefused)
+            | Reason::NetworkError(NetKind::Other)
+            | Reason::Soft404
+            | Reason::LoginWall
+            | Reason::PermanentRedirect
+            | Reason::StalenessBanner
+            | Reason::VersionDrift
+            | Reason::FarPastLastModified
+            | Reason::AnomalousResponse
+            | Reason::LocalMissing
+            | Reason::SyntaxInvalid => true,
+        }
+    }
+    assert!(fixed.iter().all(|(r, _)| coverable_in_fixed(r)));
     for (reason, want) in fixed {
         let got = reason.confidence();
         if got != want {
@@ -119,7 +142,31 @@ fn span_variants(len: usize) -> Vec<Edit> {
             }
         }
     }
+    // Malformed ranges (start > end): valid Range values the impl must reject.
+    spans.push(Edit {
+        span: len + 1..0,
+        replacement: vec![b'X'],
+    });
+    spans.push(Edit {
+        span: len + 2..1,
+        replacement: Vec::new(),
+    });
     spans
+}
+
+// The implementation legitimately rejects one ambiguous shape the oracle
+// accepts: an empty insert at position s that appears before a non-empty
+// span also starting at s in the input order. Rejecting anything else is a
+// liveness failure - the bytes a `fix --write` produces would silently stop.
+fn is_ambiguous(set: &[Edit]) -> bool {
+    for (i, a) in set.iter().enumerate() {
+        for b in &set[i + 1..] {
+            if a.span.is_empty() && a.span.start == b.span.start && !b.span.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[test]
@@ -128,12 +175,12 @@ fn apply_edits_matches_oracle() {
     for len in [0usize, 1, 4, 8] {
         let original: Vec<u8> = (0..len as u8).map(|b| b + b'a').collect();
         let edits = span_variants(len);
-        let mut sets: Vec<Vec<Edit>> = edits.iter().map(|e| vec![e.clone()]).collect();
-        // all 2-edit sets, both orders
+        let mut sets: Vec<Vec<Edit>> = vec![Vec::new()];
+        sets.extend(edits.iter().map(|e| vec![e.clone()]));
+        // all ordered 2-edit sets - the (a, b) loop already covers both orders
         for a in &edits {
             for b in &edits {
                 sets.push(vec![a.clone(), b.clone()]);
-                sets.push(vec![b.clone(), a.clone()]);
             }
         }
         for set in sets {
@@ -149,9 +196,13 @@ fn apply_edits_matches_oracle() {
                 }
                 // The implementation may conservatively reject ambiguous
                 // equal-start sets (empty insert at a span boundary), but it
-                // must NEVER accept a set the oracle calls invalid.
+                // must NEVER accept a set the oracle calls invalid, and must
+                // not reject a valid unambiguous one.
                 (Ok(out), false) => bad.push(format!(
                     "len={len} {set:?}: accepted invalid edit set -> {out:?}"
+                )),
+                (Err(e), true) if !is_ambiguous(&set) => bad.push(format!(
+                    "len={len} {set:?}: rejected a valid unambiguous set -> {e:?}"
                 )),
                 (Err(_), _) => {}
             }
