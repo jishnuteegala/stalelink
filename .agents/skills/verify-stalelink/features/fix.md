@@ -37,8 +37,10 @@ Preconditions:
   `--min-fix-confidence outdated` (the default `dead-certain` skips them).
 
 - **Preview.** Snapshot the fixture to `evidence/fixture.before`, then run
-  `stalelink fix --no-cache scratch/fix`. stdout shows a diff hunk replacing
-  `/moved` with `/ok`; the file on disk is byte-identical to the snapshot.
+  `stalelink fix --no-cache --min-fix-confidence outdated scratch/fix`. stdout
+  shows a diff hunk replacing `/moved` with `/ok`; the file on disk is
+  byte-identical to the snapshot. Without the flag the default `dead-certain`
+  threshold filters the `outdated` redirect fix and preview prints nothing.
 - **Write.** Run `stalelink fix --no-cache --write --backup
   --min-fix-confidence outdated scratch/fix`. The fixture now points at
   `/ok`, a `.bak` sibling exists; copy the result to
@@ -56,8 +58,12 @@ Preconditions:
   `dead-certain`); redirect and version-drift fixes are `outdated`, so a
   default-confidence run previews nothing for them.
 - Only findings carrying a suggested fix (`PermanentRedirect`,
-  `VersionDrift`) are rewritable; dead links with no suggested target render
-  as manual-fix or refused entries, not diffs.
+  `VersionDrift`) are rewritable; dead links with no suggested target produce
+  no fix output at all (they appear only in `scan` reports). `refused` lines
+  cover whole-file refusals from both the PDF preflight pass (e.g. encrypted,
+  signed, direct-annotation, unparseable PDFs) and the per-file fixer (e.g.
+  bare PDF text URLs, non-semantic source bytes, OOXML archive/link-part
+  errors, conflicts, unpreservable ZIP metadata).
 - The written target is re-verified after a write (`fix-verify`), so a second
   scan is the honest confirmation that a rewrite stuck.
 - `--copy` is a write mode, not a preview modifier: `stalelink fix --copy
