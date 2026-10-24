@@ -60,9 +60,10 @@ Preconditions:
 - Only findings carrying a suggested fix (`PermanentRedirect`,
   `VersionDrift`) are rewritable; dead links with no suggested target produce
   no fix output at all (they appear only in `scan` reports). `refused` lines
-  cover whole-file refusals from both the PDF preflight pass (encrypted,
-  signed, unparseable) and the per-file fixer (bare PDF text URLs, OOXML
-  archive errors, conflicting replacements).
+  cover whole-file refusals from both the PDF preflight pass (e.g. encrypted,
+  signed, direct-annotation, unparseable PDFs) and the per-file fixer (e.g.
+  bare PDF text URLs, non-semantic source bytes, OOXML archive/link-part
+  errors, conflicts, unpreservable ZIP metadata).
 - The written target is re-verified after a write (`fix-verify`), so a second
   scan is the honest confirmation that a rewrite stuck.
 - `--copy` is a write mode, not a preview modifier: `stalelink fix --copy

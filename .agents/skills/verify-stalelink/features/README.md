@@ -24,7 +24,7 @@ recipe.
 - Drive with the subcommand and long flags exactly as written; exit codes are
   part of the contract: 0 clean (or all fixes applied), 1 findings at or
   above the effective fail-on threshold (`--fail-on`, else
-  `STALELINK_OUTPUT_FAIL_ON`/`output.fail-on`, default `suspect`) or fix
+  `STALELINK_OUTPUT_FAIL_ON`, else `output.fail-on`, default `suspect`) or fix
   work refused/failed, 2 usage error, 3 environment/execution failure.
 - Use `--format json` when a recipe needs machine-checkable output and `-o`
   when it needs a written artifact; `--no-cache` whenever caching is not the
