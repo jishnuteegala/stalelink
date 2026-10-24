@@ -215,7 +215,8 @@ fn apply_edits_matches_oracle() {
 }
 
 // Order invariance: for sets the implementation accepts in both argument
-// orders, both orders must produce identical output.
+// orders, both orders must produce identical output. Kept to len <= 4 - the
+// pair loop is quadratic in the span count, and len=8 adds nothing new.
 #[test]
 fn apply_edits_order_invariant_when_accepted() {
     let mut bad = Vec::new();
