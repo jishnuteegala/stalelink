@@ -92,7 +92,7 @@ directories = "6"
 figment = { version = "0.10", features = ["env", "toml"] }
 humantime = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
-toml = "0.8"
+toml = "1.1"
 similar = "2.7"
 proptest = "1.6"
 tempfile = "3"
