@@ -8,13 +8,14 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use httpdate::parse_http_date;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 use url::Url;
 
 use crate::model::{Evidence, NetKind, Reason, Verdict};
 
 const SOFT_404_SIMILARITY: f64 = 0.9;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+const MAX_PROBE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 const RETRY_WAIT_TIME: Duration = Duration::from_secs(1);
 // Retry waits are capped so untrusted response headers and large retry counts
@@ -33,12 +34,28 @@ pub trait Checker: Send + Sync {
     fn check(&self, url: Url) -> CheckFuture<'_>;
 }
 
+#[derive(Clone)]
+enum SiblingProbe {
+    Body(Url, Arc<str>),
+    NoBody,
+    Transient,
+}
+
+#[derive(Default)]
+struct SiblingProbes {
+    cells: HashMap<String, Arc<OnceCell<SiblingProbe>>>,
+    body_bytes: usize,
+}
+
 pub struct HttpChecker {
     raw: reqwest::Client,
     retries: u8,
     retry_wait_time: Duration,
     per_host: usize,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    // A sync lock leaves no await between caching a probe and accounting for
+    // it, so a cancelled check cannot skip the byte budget.
+    siblings: std::sync::Mutex<SiblingProbes>,
 }
 impl HttpChecker {
     pub fn new(
@@ -66,6 +83,7 @@ impl HttpChecker {
             retry_wait_time,
             per_host,
             hosts: Mutex::new(HashMap::new()),
+            siblings: std::sync::Mutex::new(SiblingProbes::default()),
         })
     }
     async fn host_permit(&self, url: &Url) -> tokio::sync::OwnedSemaphorePermit {
@@ -179,15 +197,7 @@ impl HttpChecker {
         for attempt in 0..=self.retries {
             let permit = self.host_permit(url).await;
             match self.raw.request(method.clone(), url.clone()).send().await {
-                Ok(response)
-                    if attempt < self.retries
-                        && (response.status().is_server_error()
-                            || matches!(
-                                response.status(),
-                                reqwest::StatusCode::REQUEST_TIMEOUT
-                                    | reqwest::StatusCode::TOO_MANY_REQUESTS
-                            )) =>
-                {
+                Ok(response) if attempt < self.retries && transient_status(response.status()) => {
                     let delay = retry_delay(&response, attempt, self.retry_wait_time);
                     drop(response);
                     drop(permit);
@@ -202,6 +212,68 @@ impl HttpChecker {
             }
         }
         unreachable!("the retry loop always returns")
+    }
+    async fn probe_sibling(&self, probe: Url) -> SiblingProbe {
+        match self.raw_get(probe.clone()).await {
+            Ok(response) if !response.terminated => SiblingProbe::Transient,
+            Ok(response) if response.status.is_success() => {
+                SiblingProbe::Body(probe, response.body.into())
+            }
+            Ok(response) if !transient_status(response.status) => SiblingProbe::NoBody,
+            _ => SiblingProbe::Transient,
+        }
+    }
+    // Every probe in a directory requests a random missing path, so one probe
+    // per directory answers for all of its links during a scan. A transient
+    // result is never kept: links that waited on it probe for themselves, and
+    // later links start a fresh probe. A body over the byte budget is shared
+    // with the links already waiting but not retained.
+    async fn sibling(&self, url: &Url) -> Option<(Url, Arc<str>)> {
+        let probe = random_sibling(url);
+        let directory = probe
+            .as_str()
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory)
+            .to_owned();
+        let cell = self
+            .siblings
+            .lock()
+            .expect("sibling probe lock is never poisoned")
+            .cells
+            .entry(directory.clone())
+            .or_default()
+            .clone();
+        let mut initialized = false;
+        let mut result = cell
+            .get_or_init(|| {
+                initialized = true;
+                self.probe_sibling(probe.clone())
+            })
+            .await
+            .clone();
+        if initialized {
+            let mut siblings = self
+                .siblings
+                .lock()
+                .expect("sibling probe lock is never poisoned");
+            match &result {
+                SiblingProbe::Body(_, body)
+                    if siblings.body_bytes + body.len() <= MAX_PROBE_CACHE_BYTES =>
+                {
+                    siblings.body_bytes += body.len();
+                }
+                SiblingProbe::NoBody => {}
+                _ => {
+                    siblings.cells.remove(&directory);
+                }
+            }
+        } else if matches!(result, SiblingProbe::Transient) {
+            result = self.probe_sibling(probe).await;
+        }
+        match result {
+            SiblingProbe::Body(probe, body) => Some((probe, body)),
+            SiblingProbe::NoBody | SiblingProbe::Transient => None,
+        }
     }
     async fn heuristic(&self, url: Url) -> Option<Verdict> {
         let response = self.raw_get(url.clone()).await.ok()?;
@@ -273,10 +345,8 @@ impl HttpChecker {
                 upgrade.to_string(),
             ));
         }
-        let sibling = random_sibling(&url);
-        if let Ok(sibling_response) = self.raw_get(sibling.clone()).await
-            && sibling_response.status.is_success()
-            && similarity(&response.body, &sibling_response.body) >= SOFT_404_SIMILARITY
+        if let Some((sibling, sibling_body)) = self.sibling(&url).await
+            && similarity(&response.body, &sibling_body) >= SOFT_404_SIMILARITY
         {
             return Some(verdict(
                 Reason::Soft404,
@@ -284,7 +354,7 @@ impl HttpChecker {
                 format!(
                     "{} ({:.2})",
                     sibling,
-                    similarity(&response.body, &sibling_response.body)
+                    similarity(&response.body, &sibling_body)
                 ),
             ));
         }
@@ -377,6 +447,13 @@ fn network_kind(error: &reqwest::Error) -> NetKind {
     } else {
         NetKind::Other
     }
+}
+fn transient_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+        )
 }
 fn retryable_request_error(error: &reqwest::Error) -> bool {
     error.is_timeout()
@@ -687,6 +764,188 @@ mod tests {
                 .starts_with(&format!("{}/docs/", server.uri()))
         );
         assert!(verdict.evidence[0].detail.ends_with("(1.00)"));
+    }
+
+    #[tokio::test]
+    async fn probes_each_directory_once_per_checker() {
+        let server = MockServer::start().await;
+        Mock::given(path_regex("/docs/stalelink-probe-.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(path_regex("/blog/stalelink-probe-.*"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for route in ["/docs/a", "/docs/b", "/blog/c"] {
+            mount(
+                &server,
+                route,
+                ResponseTemplate::new(200).set_body_string(format!("Current page {route}")),
+            )
+            .await;
+        }
+        let checker = checker().await;
+        for route in ["/docs/a", "/docs/b", "/blog/c"] {
+            assert!(
+                checker
+                    .check(format!("{}{route}", server.uri()).parse().unwrap())
+                    .await
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shares_one_in_flight_successful_probe() {
+        let server = MockServer::start().await;
+        let soft = "Not found: choose another document";
+        Mock::given(path_regex("/docs/stalelink-probe-.*"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(soft)
+                    .set_delay(Duration::from_millis(200)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        for route in ["/docs/a", "/docs/b", "/docs/c"] {
+            mount(
+                &server,
+                route,
+                ResponseTemplate::new(200).set_body_string(soft),
+            )
+            .await;
+        }
+        let checker = checker().await;
+        let check =
+            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
+        for verdict in [a, b, c] {
+            assert_eq!(verdict.unwrap().reason, Reason::Soft404);
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_a_probe_after_a_transient_failure() {
+        let server = MockServer::start().await;
+        let soft = "Not found: choose another document";
+        let probes = Arc::new(AtomicUsize::new(0));
+        let probes_for_responder = probes.clone();
+        Mock::given(path_regex("/docs/stalelink-probe-.*"))
+            .respond_with(move |_: &wiremock::Request| {
+                if probes_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(503)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(soft)
+                }
+            })
+            .mount(&server)
+            .await;
+        for route in ["/docs/a", "/docs/b", "/docs/c"] {
+            mount(
+                &server,
+                route,
+                ResponseTemplate::new(200).set_body_string(soft),
+            )
+            .await;
+        }
+        let checker = checker().await;
+        let check =
+            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        assert!(check("/docs/a").await.is_none());
+        assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
+        assert_eq!(check("/docs/c").await.unwrap().reason, Reason::Soft404);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_a_probe_after_an_unterminated_redirect() {
+        let server = MockServer::start().await;
+        let soft = "Not found: choose another document";
+        let probes = Arc::new(AtomicUsize::new(0));
+        let probes_for_responder = probes.clone();
+        Mock::given(path_regex("/docs/stalelink-probe-.*"))
+            .respond_with(move |_: &wiremock::Request| {
+                if probes_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ResponseTemplate::new(301)
+                } else {
+                    ResponseTemplate::new(200).set_body_string(soft)
+                }
+            })
+            .mount(&server)
+            .await;
+        for route in ["/docs/a", "/docs/b"] {
+            mount(
+                &server,
+                route,
+                ResponseTemplate::new(200).set_body_string(soft),
+            )
+            .await;
+        }
+        let checker = checker().await;
+        let check =
+            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        assert!(check("/docs/a").await.is_none());
+        assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn links_waiting_on_a_failed_probe_retry_it_concurrently() {
+        let server = MockServer::start().await;
+        let delay = Duration::from_secs(1);
+        Mock::given(path_regex("/docs/stalelink-probe-.*"))
+            .respond_with(ResponseTemplate::new(503).set_delay(delay))
+            .expect(3)
+            .mount(&server)
+            .await;
+        for route in ["/docs/a", "/docs/b", "/docs/c"] {
+            mount(&server, route, ResponseTemplate::new(200)).await;
+        }
+        let checker =
+            HttpChecker::new(Duration::from_secs(2), 0, 4, "stalelink-test".into()).unwrap();
+        let check =
+            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let started = std::time::Instant::now();
+        let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
+        assert!(a.is_none() && b.is_none() && c.is_none());
+        // One shared failed probe, then the two waiting links probe in parallel,
+        // rather than three probes one after another.
+        assert!(started.elapsed() < delay * 5 / 2);
+    }
+
+    #[tokio::test]
+    async fn bounds_retained_probe_bodies_across_directories() {
+        let server = MockServer::start().await;
+        let probes = Arc::new(AtomicUsize::new(0));
+        let probes_for_responder = probes.clone();
+        Mock::given(path_regex("/dir-[0-9]+/stalelink-probe-.*"))
+            .respond_with(move |_: &wiremock::Request| {
+                probes_for_responder.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_string("x".repeat(MAX_BODY_BYTES))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(path_regex("/dir-[0-9]+/page-[ab]"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("Current page"))
+            .mount(&server)
+            .await;
+        let retained = MAX_PROBE_CACHE_BYTES / MAX_BODY_BYTES;
+        let overflow = 8;
+        let directories = retained + overflow;
+        let checker = checker().await;
+        for page in ["a", "b"] {
+            for directory in 0..directories {
+                let url = format!("{}/dir-{directory}/page-{page}", server.uri());
+                assert!(checker.check(url.parse().unwrap()).await.is_none());
+            }
+        }
+        let siblings = checker.siblings.lock().unwrap();
+        assert_eq!(siblings.body_bytes, retained * MAX_BODY_BYTES);
+        assert_eq!(probes.load(Ordering::SeqCst), directories + overflow);
     }
 
     #[tokio::test]
