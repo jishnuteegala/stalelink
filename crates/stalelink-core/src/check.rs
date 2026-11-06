@@ -101,93 +101,55 @@ impl HttpChecker {
             .await
             .expect("per-host semaphore is never closed")
     }
-    async fn status(
-        &self,
-        method: reqwest::Method,
-        url: Url,
-    ) -> Result<StatusResult, reqwest::Error> {
-        let mut current = url;
-        let mut visited = HashSet::from([current.clone()]);
-        let mut redirects = 0;
-        loop {
-            let (response, permit) = self.request(method.clone(), &current).await?;
-            let status = response.status();
-            if !status.is_redirection() {
-                drop(response);
-                drop(permit);
-                return Ok(StatusResult::Terminal(status));
-            }
-            let next = response
-                .headers()
-                .get(reqwest::header::LOCATION)
-                .and_then(|location| location.to_str().ok())
-                .and_then(|location| current.join(location).ok());
-            drop(response);
-            drop(permit);
-            let Some(next) = next else {
-                return Ok(StatusResult::Terminal(status));
-            };
-            redirects += 1;
-            if redirects > MAX_REDIRECTS {
-                return Ok(StatusResult::Unterminated("redirect limit exhausted"));
-            }
-            if !visited.insert(next.clone()) {
-                return Ok(StatusResult::Unterminated("redirect loop detected"));
-            }
-            current = next;
-        }
-    }
-    async fn raw_get(&self, url: Url) -> Result<RawResponse, reqwest::Error> {
+    async fn walk(&self, method: reqwest::Method, url: Url) -> Result<Walk, reqwest::Error> {
         let origin = url.clone();
         let mut current = url;
         let mut redirects = Vec::new();
         let mut visited = HashSet::from([current.clone()]);
         loop {
-            let (response, permit) = self.request(reqwest::Method::GET, &current).await?;
-            if !response.status().is_redirection() {
-                let headers = response.headers().clone();
-                let status = response.status();
-                let body = read_body(response, permit).await?;
-                return Ok(RawResponse {
-                    status,
-                    origin,
-                    url: current,
-                    redirects,
-                    headers,
-                    body,
-                    terminated: true,
-                });
-            }
-            let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                return Ok(unterminated_response(
-                    response, permit, current, origin, redirects,
-                ));
+            let (response, permit) = self.request(method.clone(), &current).await?;
+            let next = response
+                .status()
+                .is_redirection()
+                .then(|| response.headers().get(reqwest::header::LOCATION))
+                .flatten()
+                .and_then(|location| location.to_str().ok())
+                .and_then(|location| current.join(location).ok());
+            let unterminated = match next {
+                None => None,
+                Some(next) => {
+                    redirects.push((response.status(), next.clone()));
+                    if redirects.len() > MAX_REDIRECTS {
+                        Some("redirect limit exhausted")
+                    } else if !visited.insert(next.clone()) {
+                        Some("redirect loop detected")
+                    } else {
+                        drop(response);
+                        drop(permit);
+                        current = next;
+                        continue;
+                    }
+                }
             };
-            let Ok(location) = location.to_str() else {
-                return Ok(unterminated_response(
-                    response, permit, current, origin, redirects,
-                ));
-            };
-            let Ok(next) = current.join(location) else {
-                return Ok(unterminated_response(
-                    response, permit, current, origin, redirects,
-                ));
-            };
-            redirects.push((response.status(), next.clone()));
-            if redirects.len() > MAX_REDIRECTS {
-                return Ok(unterminated_response(
-                    response, permit, current, origin, redirects,
-                ));
-            }
-            if !visited.insert(next.clone()) {
-                return Ok(unterminated_response(
-                    response, permit, current, origin, redirects,
-                ));
-            }
-            drop(response);
-            drop(permit);
-            current = next;
+            return Ok(Walk {
+                response,
+                permit,
+                origin,
+                url: current,
+                redirects,
+                unterminated,
+            });
         }
+    }
+    async fn status(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> Result<StatusResult, reqwest::Error> {
+        Ok(self.walk(method, url).await?.status())
+    }
+    async fn raw_get(&self, url: Url) -> Result<RawResponse, reqwest::Error> {
+        self.walk(reqwest::Method::GET, url).await?.read().await
     }
     async fn request(
         &self,
@@ -275,8 +237,7 @@ impl HttpChecker {
             SiblingProbe::NoBody | SiblingProbe::Transient => None,
         }
     }
-    async fn heuristic(&self, url: Url) -> Option<Verdict> {
-        let response = self.raw_get(url.clone()).await.ok()?;
+    async fn heuristic(&self, response: RawResponse) -> Option<Verdict> {
         if !response.terminated {
             return None;
         }
@@ -333,7 +294,7 @@ impl HttpChecker {
                 (*phrase).into(),
             ));
         }
-        if let Some(upgrade) = version_upgrade(&url)
+        if let Some(upgrade) = version_upgrade(&response.origin)
             && self
                 .raw_get(upgrade.clone())
                 .await
@@ -345,7 +306,7 @@ impl HttpChecker {
                 upgrade.to_string(),
             ));
         }
-        if let Some((sibling, sibling_body)) = self.sibling(&url).await
+        if let Some((sibling, sibling_body)) = self.sibling(&response.origin).await
             && similarity(&response.body, &sibling_body) >= SOFT_404_SIMILARITY
         {
             return Some(verdict(
@@ -368,22 +329,26 @@ impl Checker for HttpChecker {
             // Retry with GET when the server signals HEAD is unsupported or
             // disallowed: 403 Forbidden, 405 Method Not Allowed, 501 Not
             // Implemented. A subsequent GET may well return 200.
-            if matches!(
+            let response = if matches!(
                 finding.as_ref().map(|verdict| &verdict.reason),
                 Some(Reason::HttpStatus(403 | 405 | 501))
             ) {
-                let fallback = outcome(self.status(reqwest::Method::GET, url.clone()).await);
-                return if fallback.is_some() {
-                    fallback
-                } else {
-                    self.heuristic(url).await
+                // Heuristics need exactly this GET walk from the link, so its
+                // body is read instead of requesting the chain a second time.
+                let walk = match self.walk(reqwest::Method::GET, url).await {
+                    Ok(walk) => walk,
+                    Err(error) => return outcome(Err(error)),
                 };
-            }
-            if finding.is_some() {
-                finding
+                if let Some(fallback) = outcome(Ok(walk.status())) {
+                    return Some(fallback);
+                }
+                walk.read().await
+            } else if finding.is_some() {
+                return finding;
             } else {
-                self.heuristic(url).await
-            }
+                self.raw_get(url).await
+            };
+            self.heuristic(response.ok()?).await
         })
     }
 }
@@ -558,25 +523,41 @@ struct RawResponse {
     terminated: bool,
 }
 
-fn unterminated_response(
+// A walk ends at the first response that is not a followable redirect, or at
+// the redirect where the chain was abandoned (`unterminated`: limit or loop).
+struct Walk {
     response: reqwest::Response,
     permit: tokio::sync::OwnedSemaphorePermit,
-    url: Url,
     origin: Url,
+    url: Url,
     redirects: Vec<(reqwest::StatusCode, Url)>,
-) -> RawResponse {
-    let status = response.status();
-    let headers = response.headers().clone();
-    drop(response);
-    drop(permit);
-    RawResponse {
-        status,
-        origin,
-        url,
-        redirects,
-        headers,
-        body: String::new(),
-        terminated: false,
+    unterminated: Option<&'static str>,
+}
+impl Walk {
+    fn status(&self) -> StatusResult {
+        match self.unterminated {
+            Some(reason) => StatusResult::Unterminated(reason),
+            None => StatusResult::Terminal(self.response.status()),
+        }
+    }
+    async fn read(self) -> Result<RawResponse, reqwest::Error> {
+        let status = self.response.status();
+        let headers = self.response.headers().clone();
+        let terminated = !status.is_redirection();
+        let body = if terminated {
+            read_body(self.response, self.permit).await?
+        } else {
+            String::new()
+        };
+        Ok(RawResponse {
+            status,
+            origin: self.origin,
+            url: self.url,
+            redirects: self.redirects,
+            headers,
+            body,
+            terminated,
+        })
     }
 }
 
@@ -733,6 +714,30 @@ mod tests {
             .respond_with(response)
             .mount(server)
             .await;
+    }
+
+    async fn mount_method(
+        server: &MockServer,
+        verb: &str,
+        route: &str,
+        response: ResponseTemplate,
+    ) {
+        Mock::given(method(verb))
+            .and(path(route))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn redirect(status: u16, location: &str) -> ResponseTemplate {
+        ResponseTemplate::new(status).insert_header("location", location)
+    }
+
+    async fn check_route(server: &MockServer, route: &str) -> Option<Verdict> {
+        checker()
+            .await
+            .check(format!("{}{route}", server.uri()).parse().unwrap())
+            .await
     }
 
     #[tokio::test]
@@ -1102,22 +1107,31 @@ mod tests {
     #[tokio::test]
     async fn runs_heuristics_after_a_clean_get_fallback() {
         let server = MockServer::start().await;
-        Mock::given(method("HEAD"))
-            .and(path("/deprecated"))
-            .respond_with(ResponseTemplate::new(405))
-            .mount(&server)
-            .await;
+        mount_method(&server, "HEAD", "/deprecated", ResponseTemplate::new(405)).await;
         Mock::given(method("GET"))
             .and(path("/deprecated"))
             .respond_with(ResponseTemplate::new(200).set_body_string("This page is deprecated."))
+            .expect(1)
             .mount(&server)
             .await;
-        let verdict = checker()
-            .await
-            .check(format!("{}/deprecated", server.uri()).parse().unwrap())
-            .await
-            .unwrap();
+        let verdict = check_route(&server, "/deprecated").await.unwrap();
         assert_eq!(verdict.reason, Reason::StalenessBanner);
+    }
+
+    #[tokio::test]
+    async fn get_fallback_failures_are_reported() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .respond_with(ResponseTemplate::new(405))
+            .mount(&server)
+            .await;
+        mount_method(&server, "GET", "/gone", ResponseTemplate::new(404)).await;
+        mount_method(&server, "GET", "/loop", redirect(302, "/loop")).await;
+        let gone = check_route(&server, "/gone").await.unwrap();
+        assert_eq!(gone.reason, Reason::HttpStatus(404));
+        let looped = check_route(&server, "/loop").await.unwrap();
+        assert_eq!(looped.reason, Reason::NetworkError(NetKind::Other));
+        assert_eq!(looped.evidence[0].detail, "redirect loop detected");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1271,13 +1285,10 @@ mod tests {
         )
         .await;
         for route in ["/loop", "/missing", "/invalid", "/one"] {
-            assert!(
-                checker()
-                    .await
-                    .heuristic(format!("{}{route}", server.uri()).parse().unwrap())
-                    .await
-                    .is_none()
-            );
+            let checker = checker().await;
+            let url: Url = format!("{}{route}", server.uri()).parse().unwrap();
+            let response = checker.raw_get(url).await.unwrap();
+            assert!(checker.heuristic(response).await.is_none());
         }
     }
 
@@ -1562,5 +1573,85 @@ mod tests {
             StatusResult::Unterminated("redirect loop detected")
         );
         assert!(!checker().await.raw_get(url).await.unwrap().terminated);
+    }
+
+    #[tokio::test]
+    async fn heuristics_reuse_the_get_fallback_walk() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/a", ResponseTemplate::new(405)).await;
+        Mock::given(method("GET"))
+            .and(path("/a"))
+            .respond_with(redirect(301, "/b"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/b"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let verdict = check_route(&server, "/a").await.unwrap();
+        assert_eq!(verdict.reason, Reason::PermanentRedirect);
+        assert_eq!(verdict.evidence[0].detail, format!("{}/b", server.uri()));
+    }
+
+    #[tokio::test]
+    async fn heuristics_follow_get_redirects_not_head_redirects() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/old", redirect(301, "/new")).await;
+        mount_method(&server, "GET", "/old", redirect(302, "/actual")).await;
+        mount_method(&server, "HEAD", "/moved", redirect(302, "/new")).await;
+        mount_method(&server, "GET", "/moved", redirect(301, "/actual")).await;
+        mount(&server, "/new", ResponseTemplate::new(200)).await;
+        mount(&server, "/actual", ResponseTemplate::new(200)).await;
+        assert!(check_route(&server, "/old").await.is_none());
+        let verdict = check_route(&server, "/moved").await.unwrap();
+        assert_eq!(verdict.reason, Reason::PermanentRedirect);
+        assert_eq!(
+            verdict.evidence[0].detail,
+            format!("{}/actual", server.uri())
+        );
+    }
+
+    #[tokio::test]
+    async fn head_only_login_redirects_are_not_login_walls() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/start", redirect(302, "/login")).await;
+        mount_method(&server, "GET", "/start", ResponseTemplate::new(200)).await;
+        mount(&server, "/login", ResponseTemplate::new(200)).await;
+        assert!(check_route(&server, "/start").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_login_redirects_are_found_when_head_redirects_elsewhere() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/start", redirect(301, "/moved")).await;
+        mount_method(&server, "GET", "/start", redirect(302, "/login")).await;
+        mount(&server, "/moved", ResponseTemplate::new(200)).await;
+        mount(&server, "/login", ResponseTemplate::new(200)).await;
+        let verdict = check_route(&server, "/start").await.unwrap();
+        assert_eq!(verdict.reason, Reason::LoginWall);
+        assert_eq!(
+            verdict.evidence[0].detail,
+            format!("{0}/start -> {0}/login", server.uri())
+        );
+    }
+
+    #[tokio::test]
+    async fn head_redirects_do_not_count_toward_get_loop_detection() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/a", redirect(302, "/b")).await;
+        mount_method(&server, "HEAD", "/b", ResponseTemplate::new(200)).await;
+        mount_method(&server, "GET", "/b", redirect(302, "/a")).await;
+        mount_method(
+            &server,
+            "GET",
+            "/a",
+            ResponseTemplate::new(200).set_body_string("This page is deprecated."),
+        )
+        .await;
+        let verdict = check_route(&server, "/a").await.unwrap();
+        assert_eq!(verdict.reason, Reason::StalenessBanner);
     }
 }
