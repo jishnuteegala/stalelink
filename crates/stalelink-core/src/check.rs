@@ -135,7 +135,7 @@ impl HttpChecker {
                 .flatten()
                 .and_then(|location| location.to_str().ok())
                 .and_then(|location| current.join(location).ok());
-            let unterminated = match next {
+            let abandoned = match next {
                 None => None,
                 Some(next) => {
                     redirects.push((response.status(), next.clone()));
@@ -157,7 +157,7 @@ impl HttpChecker {
                 origin,
                 url: current,
                 redirects,
-                unterminated,
+                abandoned,
             });
         }
     }
@@ -524,19 +524,17 @@ struct RawResponse {
     terminated: bool,
 }
 
-// A walk ends at the first response that is not a followable redirect, or at
-// the redirect where the chain was abandoned (`unterminated`: limit or loop).
 struct Walk {
     response: reqwest::Response,
     permit: tokio::sync::OwnedSemaphorePermit,
     origin: Url,
     url: Url,
     redirects: Vec<(reqwest::StatusCode, Url)>,
-    unterminated: Option<&'static str>,
+    abandoned: Option<&'static str>,
 }
 impl Walk {
     fn status(&self) -> StatusResult {
-        match self.unterminated {
+        match self.abandoned {
             Some(reason) => StatusResult::Unterminated(reason),
             None => StatusResult::Terminal(self.response.status()),
         }
