@@ -730,11 +730,12 @@ mod tests {
         ResponseTemplate::new(status).insert_header("location", location)
     }
 
+    fn link(server: &MockServer, route: &str) -> Url {
+        format!("{}{route}", server.uri()).parse().unwrap()
+    }
+
     async fn check_route(server: &MockServer, route: &str) -> Option<Verdict> {
-        checker()
-            .await
-            .check(format!("{}{route}", server.uri()).parse().unwrap())
-            .await
+        checker().await.check(link(server, route)).await
     }
 
     #[tokio::test]
@@ -791,12 +792,7 @@ mod tests {
         }
         let checker = checker().await;
         for route in ["/docs/a", "/docs/b", "/blog/c"] {
-            assert!(
-                checker
-                    .check(format!("{}{route}", server.uri()).parse().unwrap())
-                    .await
-                    .is_none()
-            );
+            assert!(checker.check(link(&server, route)).await.is_none());
         }
     }
 
@@ -822,8 +818,7 @@ mod tests {
             .await;
         }
         let checker = checker().await;
-        let check =
-            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let check = |route: &str| checker.check(link(&server, route));
         let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
         for verdict in [a, b, c] {
             assert_eq!(verdict.unwrap().reason, Reason::Soft404);
@@ -855,8 +850,7 @@ mod tests {
             .await;
         }
         let checker = checker().await;
-        let check =
-            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let check = |route: &str| checker.check(link(&server, route));
         assert!(check("/docs/a").await.is_none());
         assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
         assert_eq!(check("/docs/c").await.unwrap().reason, Reason::Soft404);
@@ -888,8 +882,7 @@ mod tests {
             .await;
         }
         let checker = checker().await;
-        let check =
-            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let check = |route: &str| checker.check(link(&server, route));
         assert!(check("/docs/a").await.is_none());
         assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
         assert_eq!(probes.load(Ordering::SeqCst), 2);
@@ -909,8 +902,7 @@ mod tests {
         }
         let checker =
             HttpChecker::new(Duration::from_secs(2), 0, 4, "stalelink-test".into()).unwrap();
-        let check =
-            |route: &str| checker.check(format!("{}{route}", server.uri()).parse().unwrap());
+        let check = |route: &str| checker.check(link(&server, route));
         let started = std::time::Instant::now();
         let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
         assert!(a.is_none() && b.is_none() && c.is_none());
@@ -1282,8 +1274,7 @@ mod tests {
         .await;
         for route in ["/loop", "/missing", "/invalid", "/one"] {
             let checker = checker().await;
-            let url: Url = format!("{}{route}", server.uri()).parse().unwrap();
-            let response = checker.raw_get(url).await.unwrap();
+            let response = checker.raw_get(link(&server, route)).await.unwrap();
             assert!(checker.heuristic(response).await.is_none());
         }
     }
