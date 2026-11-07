@@ -46,6 +46,26 @@ struct SiblingProbes {
     cells: HashMap<String, Arc<OnceCell<SiblingProbe>>>,
     body_bytes: usize,
 }
+impl SiblingProbes {
+    fn cell(&mut self, directory: &str) -> Arc<OnceCell<SiblingProbe>> {
+        self.cells.entry(directory.to_owned()).or_default().clone()
+    }
+    // Only a conclusive result within the byte budget stays for later links;
+    // links already waiting on a dropped cell still see its result.
+    fn settle(&mut self, directory: &str, result: &SiblingProbe) {
+        match result {
+            SiblingProbe::Body(_, body)
+                if self.body_bytes + body.len() <= MAX_PROBE_CACHE_BYTES =>
+            {
+                self.body_bytes += body.len();
+            }
+            SiblingProbe::NoBody => {}
+            SiblingProbe::Body(..) | SiblingProbe::Transient => {
+                self.cells.remove(directory);
+            }
+        }
+    }
+}
 
 pub struct HttpChecker {
     raw: reqwest::Client,
@@ -175,6 +195,11 @@ impl HttpChecker {
         }
         unreachable!("the retry loop always returns")
     }
+    fn siblings(&self) -> std::sync::MutexGuard<'_, SiblingProbes> {
+        self.siblings
+            .lock()
+            .expect("sibling probe lock is never poisoned")
+    }
     async fn probe_sibling(&self, probe: Url) -> SiblingProbe {
         match self.raw_get(probe.clone()).await {
             Ok(response) if !response.terminated => SiblingProbe::Transient,
@@ -185,11 +210,8 @@ impl HttpChecker {
             _ => SiblingProbe::Transient,
         }
     }
-    // Every probe in a directory requests a random missing path, so one probe
-    // per directory answers for all of its links during a scan. A transient
-    // result is never kept: links that waited on it probe for themselves, and
-    // later links start a fresh probe. A body over the byte budget is shared
-    // with the links already waiting but not retained.
+    // Every probe requests a random missing path, so one conclusive probe
+    // answers for every link in its directory.
     async fn sibling(&self, url: &Url) -> Option<(Url, Arc<str>)> {
         let probe = random_sibling(url);
         let directory = probe
@@ -197,14 +219,7 @@ impl HttpChecker {
             .rsplit_once('/')
             .map_or("", |(directory, _)| directory)
             .to_owned();
-        let cell = self
-            .siblings
-            .lock()
-            .expect("sibling probe lock is never poisoned")
-            .cells
-            .entry(directory.clone())
-            .or_default()
-            .clone();
+        let cell = self.siblings().cell(&directory);
         let mut initialized = false;
         let mut result = cell
             .get_or_init(|| {
@@ -214,21 +229,7 @@ impl HttpChecker {
             .await
             .clone();
         if initialized {
-            let mut siblings = self
-                .siblings
-                .lock()
-                .expect("sibling probe lock is never poisoned");
-            match &result {
-                SiblingProbe::Body(_, body)
-                    if siblings.body_bytes + body.len() <= MAX_PROBE_CACHE_BYTES =>
-                {
-                    siblings.body_bytes += body.len();
-                }
-                SiblingProbe::NoBody => {}
-                _ => {
-                    siblings.cells.remove(&directory);
-                }
-            }
+            self.siblings().settle(&directory, &result);
         } else if matches!(result, SiblingProbe::Transient) {
             result = self.probe_sibling(probe).await;
         }
