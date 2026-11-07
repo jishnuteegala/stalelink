@@ -826,66 +826,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_a_probe_after_a_transient_failure() {
-        let server = MockServer::start().await;
+    async fn retries_a_probe_after_an_inconclusive_result() {
         let soft = "Not found: choose another document";
-        let probes = Arc::new(AtomicUsize::new(0));
-        let probes_for_responder = probes.clone();
-        Mock::given(path_regex("/docs/stalelink-probe-.*"))
-            .respond_with(move |_: &wiremock::Request| {
-                if probes_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
-                    ResponseTemplate::new(503)
-                } else {
-                    ResponseTemplate::new(200).set_body_string(soft)
-                }
-            })
-            .mount(&server)
-            .await;
-        for route in ["/docs/a", "/docs/b", "/docs/c"] {
-            mount(
-                &server,
-                route,
-                ResponseTemplate::new(200).set_body_string(soft),
-            )
-            .await;
+        // A 503 is transient, and a 301 without a location never reaches a
+        // final response.
+        for inconclusive in [503, 301] {
+            let server = MockServer::start().await;
+            let probes = Arc::new(AtomicUsize::new(0));
+            let probes_for_responder = probes.clone();
+            Mock::given(path_regex("/docs/stalelink-probe-.*"))
+                .respond_with(move |_: &wiremock::Request| {
+                    if probes_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(inconclusive)
+                    } else {
+                        ResponseTemplate::new(200).set_body_string(soft)
+                    }
+                })
+                .mount(&server)
+                .await;
+            for route in ["/docs/a", "/docs/b", "/docs/c"] {
+                mount(
+                    &server,
+                    route,
+                    ResponseTemplate::new(200).set_body_string(soft),
+                )
+                .await;
+            }
+            let checker = checker().await;
+            let check = |route: &str| checker.check(link(&server, route));
+            assert!(check("/docs/a").await.is_none());
+            assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
+            assert_eq!(check("/docs/c").await.unwrap().reason, Reason::Soft404);
+            assert_eq!(
+                probes.load(Ordering::SeqCst),
+                2,
+                "first probe {inconclusive}"
+            );
         }
-        let checker = checker().await;
-        let check = |route: &str| checker.check(link(&server, route));
-        assert!(check("/docs/a").await.is_none());
-        assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
-        assert_eq!(check("/docs/c").await.unwrap().reason, Reason::Soft404);
-        assert_eq!(probes.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn retries_a_probe_after_an_unterminated_redirect() {
-        let server = MockServer::start().await;
-        let soft = "Not found: choose another document";
-        let probes = Arc::new(AtomicUsize::new(0));
-        let probes_for_responder = probes.clone();
-        Mock::given(path_regex("/docs/stalelink-probe-.*"))
-            .respond_with(move |_: &wiremock::Request| {
-                if probes_for_responder.fetch_add(1, Ordering::SeqCst) == 0 {
-                    ResponseTemplate::new(301)
-                } else {
-                    ResponseTemplate::new(200).set_body_string(soft)
-                }
-            })
-            .mount(&server)
-            .await;
-        for route in ["/docs/a", "/docs/b"] {
-            mount(
-                &server,
-                route,
-                ResponseTemplate::new(200).set_body_string(soft),
-            )
-            .await;
-        }
-        let checker = checker().await;
-        let check = |route: &str| checker.check(link(&server, route));
-        assert!(check("/docs/a").await.is_none());
-        assert_eq!(check("/docs/b").await.unwrap().reason, Reason::Soft404);
-        assert_eq!(probes.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
