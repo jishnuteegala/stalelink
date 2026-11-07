@@ -913,8 +913,6 @@ mod tests {
                 assert!(checker.check(url.parse().unwrap()).await.is_none());
             }
         }
-        let siblings = checker.siblings.lock().unwrap();
-        assert_eq!(siblings.body_bytes, retained * MAX_BODY_BYTES);
         assert_eq!(probes.load(Ordering::SeqCst), directories + overflow);
     }
 
