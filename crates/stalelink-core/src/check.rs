@@ -334,8 +334,6 @@ impl Checker for HttpChecker {
                 finding.as_ref().map(|verdict| &verdict.reason),
                 Some(Reason::HttpStatus(403 | 405 | 501))
             ) {
-                // Heuristics need exactly this GET walk from the link, so its
-                // body is read instead of requesting the chain a second time.
                 let walk = match self.walk(reqwest::Method::GET, url).await {
                     Ok(walk) => walk,
                     Err(error) => return outcome(Err(error)),
@@ -916,9 +914,8 @@ mod tests {
         let started = std::time::Instant::now();
         let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
         assert!(a.is_none() && b.is_none() && c.is_none());
-        // One shared failed probe, then the two waiting links probe in parallel,
-        // rather than three probes one after another.
-        assert!(started.elapsed() < delay * 5 / 2);
+        let shared_then_parallel = delay * 2;
+        assert!(started.elapsed() < shared_then_parallel + delay / 2);
     }
 
     #[tokio::test]
