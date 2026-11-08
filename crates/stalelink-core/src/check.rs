@@ -210,8 +210,8 @@ impl HttpChecker {
             _ => SiblingProbe::Transient,
         }
     }
-    // Every probe requests a random missing path, so one conclusive probe
-    // answers for every link in its directory.
+    // Every probe requests a random missing path, so one probe answers for
+    // every link in its directory.
     async fn sibling(&self, url: &Url) -> Option<(Url, Arc<str>)> {
         let probe = random_sibling(url);
         let directory = probe
@@ -220,19 +220,14 @@ impl HttpChecker {
             .map_or("", |(directory, _)| directory)
             .to_owned();
         let cell = self.siblings().cell(&directory);
-        let mut initialized = false;
-        let mut result = cell
-            .get_or_init(|| {
-                initialized = true;
-                self.probe_sibling(probe.clone())
+        let result = cell
+            .get_or_init(|| async move {
+                let result = self.probe_sibling(probe).await;
+                self.siblings().settle(&directory, &result);
+                result
             })
             .await
             .clone();
-        if initialized {
-            self.siblings().settle(&directory, &result);
-        } else if matches!(result, SiblingProbe::Transient) {
-            result = self.probe_sibling(probe).await;
-        }
         match result {
             SiblingProbe::Body(probe, body) => Some((probe, body)),
             SiblingProbe::NoBody | SiblingProbe::Transient => None,
@@ -797,31 +792,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shares_one_in_flight_successful_probe() {
-        let server = MockServer::start().await;
+    async fn links_share_one_in_flight_probe_whatever_it_returns() {
         let soft = "Not found: choose another document";
-        Mock::given(path_regex("/docs/stalelink-probe-.*"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(soft)
-                    .set_delay(Duration::from_millis(200)),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        for route in ["/docs/a", "/docs/b", "/docs/c"] {
-            mount(
-                &server,
-                route,
-                ResponseTemplate::new(200).set_body_string(soft),
-            )
-            .await;
-        }
-        let checker = checker().await;
-        let check = |route: &str| checker.check(link(&server, route));
-        let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
-        for verdict in [a, b, c] {
-            assert_eq!(verdict.unwrap().reason, Reason::Soft404);
+        // A 503 is transient, and a 301 without a location never reaches a
+        // final response.
+        for (status, expected) in [
+            (200, Some(Reason::Soft404)),
+            (404, None),
+            (503, None),
+            (301, None),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(path_regex("/docs/stalelink-probe-.*"))
+                .respond_with(ResponseTemplate::new(status).set_body_string(soft))
+                .expect(1)
+                .mount(&server)
+                .await;
+            for route in ["/docs/a", "/docs/b", "/docs/c"] {
+                mount(
+                    &server,
+                    route,
+                    ResponseTemplate::new(200).set_body_string(soft),
+                )
+                .await;
+            }
+            // The probe's request timeout keeps running while its check is
+            // left unpolled below, so it must outlast the test's own timeout.
+            let checker =
+                HttpChecker::new(Duration::from_secs(60), 0, 2, "stalelink-test".into()).unwrap();
+            let directory = format!("{}/docs", server.uri());
+            let (checker, directory) = (&checker, &directory);
+            // The probe map holds the directory's cell, and so does every check
+            // inside `sibling`.
+            let held_by = |count| async move {
+                while checker
+                    .siblings()
+                    .cells
+                    .get(directory)
+                    .map_or(0, Arc::strong_count)
+                    < count
+                {
+                    tokio::task::yield_now().await;
+                }
+            };
+            let check = |route: &str| checker.check(link(&server, route));
+            let (mut a, mut b, mut c) = (check("/docs/a"), check("/docs/b"), check("/docs/c"));
+            let (a, b, c) = tokio::time::timeout(Duration::from_secs(30), async {
+                // `a` is not polled again until `b` and `c` wait on its probe,
+                // so the probe stays in flight whatever it returns. Unconstrained,
+                // `a` cannot yield to the coop budget between taking the cell and
+                // starting the probe.
+                tokio::select! {
+                    biased;
+                    () = held_by(2) => {}
+                    _ = tokio::task::unconstrained(&mut a) => {
+                        panic!("probe {status}: a finished without a probe in flight")
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    () = held_by(4) => {}
+                    _ = async { tokio::join!(&mut b, &mut c) } => {
+                        panic!("probe {status}: b and c finished without waiting on the probe")
+                    }
+                }
+                tokio::join!(a, b, c)
+            })
+            .await
+            .unwrap_or_else(|_| panic!("probe {status}: checks did not finish"));
+            for verdict in [a, b, c] {
+                assert_eq!(
+                    verdict.map(|verdict| verdict.reason),
+                    expected,
+                    "probe {status}"
+                );
+            }
         }
     }
 
@@ -863,28 +908,6 @@ mod tests {
                 "first probe {inconclusive}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn links_waiting_on_a_failed_probe_retry_it_concurrently() {
-        let server = MockServer::start().await;
-        let delay = Duration::from_secs(1);
-        Mock::given(path_regex("/docs/stalelink-probe-.*"))
-            .respond_with(ResponseTemplate::new(503).set_delay(delay))
-            .expect(3)
-            .mount(&server)
-            .await;
-        for route in ["/docs/a", "/docs/b", "/docs/c"] {
-            mount(&server, route, ResponseTemplate::new(200)).await;
-        }
-        let checker =
-            HttpChecker::new(Duration::from_secs(2), 0, 4, "stalelink-test".into()).unwrap();
-        let check = |route: &str| checker.check(link(&server, route));
-        let started = std::time::Instant::now();
-        let (a, b, c) = tokio::join!(check("/docs/a"), check("/docs/b"), check("/docs/c"));
-        assert!(a.is_none() && b.is_none() && c.is_none());
-        let shared_then_parallel = delay * 2;
-        assert!(started.elapsed() < shared_then_parallel + delay / 2);
     }
 
     #[tokio::test]
