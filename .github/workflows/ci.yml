@@ -38,7 +38,7 @@ jobs:
           node-version: 24
       - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2
         with:
-          tool: cargo-dist
+          tool: cargo-dist@0.32.0
       - run: npm test
 
   dist-plan:
@@ -50,7 +50,7 @@ jobs:
           toolchain: stable
       - uses: taiki-e/install-action@91ddec75689c4c78665b598d188dc821c5a43e5c # v2
         with:
-          tool: cargo-dist
+          tool: cargo-dist@0.32.0
       - run: dist plan --output-format=json
       - run: dist generate --check
       - name: Assert cargo-dist artifact names
