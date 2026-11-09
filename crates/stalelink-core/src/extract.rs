@@ -1720,7 +1720,7 @@ mod tests {
     fn docx_field_instructions_decode_cdata_and_character_references() {
         let bytes = zip(&[(
             "word/document.xml",
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:instrText><![CDATA[HYPERLINK \"https://cdata.test/x\"]]></w:instrText></w:p><w:p><w:r><w:t>a &#0; b</w:t></w:r></w:p><w:p><w:instrText>HYPERLINK &#34;https://char.test/x?a=1&#x26;b=2&#34;</w:instrText></w:p></w:body></w:document>",
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:instrText><![CDATA[HYPERLINK \"https://cdata.test/x\"]]></w:instrText></w:p><w:p><w:r><w:t>a &#0; b</w:t></w:r></w:p><w:p><w:instrText>HYPERLINK &#34;https://char.test/x?a=1&#x26;b=2&#34; &#0;</w:instrText></w:p></w:body></w:document>",
         )]);
         let links = extract(&binary_document(DocFormat::Docx, bytes)).unwrap();
         let urls = links
