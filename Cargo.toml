@@ -89,7 +89,7 @@ lopdf = { version = "0.47", default-features = false }
 zip = { version = "9.5", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"
 directories = "6"
-figment = { version = "0.10", features = ["env", "toml"] }
+figment = { version = "0.10", features = ["env"] }
 humantime = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "1"

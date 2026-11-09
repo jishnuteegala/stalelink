@@ -1252,6 +1252,43 @@ mod tests {
     }
 
     #[test]
+    fn ooxml_round_trips_relationship_target_with_literal_whitespace() {
+        let replacement = "https://new.test/y";
+        let original = archive(&[
+            (
+                "word/_rels/document.xml.rels",
+                "<Relationships><Relationship Id=\"r\" TargetMode=\"External\" Target=\"https://old.test/a\tb\nc\"/></Relationships>",
+            ),
+            (
+                "word/document.xml",
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:hyperlink r:id="r"/></w:p></w:body></w:document>"#,
+            ),
+        ]);
+        let document = SourceDocument {
+            path: PathBuf::new(),
+            format: DocFormat::Docx,
+            bytes: original.clone(),
+        };
+        let links = extract(&document).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, "https://old.test/a\tb\nc");
+        let finding = binary_finding(
+            DocFormat::Docx,
+            &links[0].url,
+            replacement,
+            links[0].source.location.clone(),
+        );
+        let fixed = OoxmlFixer.fix(&original, &[finding]).unwrap();
+        let links = extract(&SourceDocument {
+            bytes: fixed,
+            ..document
+        })
+        .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].url, replacement);
+    }
+
+    #[test]
     fn ooxml_round_trips_each_repeated_complex_field_url() {
         let replacement = "https://new.test/y";
         let original = archive(&[(

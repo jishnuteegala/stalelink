@@ -6,9 +6,22 @@ use std::{
 
 use figment::{
     Figment,
-    providers::{Format, Serialized, Toml},
+    providers::{Format, Serialized},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+// figment's built-in TOML provider uses toml 0.8; loading through the same toml
+// crate as validate_toml keeps validation and loading on one TOML grammar.
+struct Toml;
+
+impl Format for Toml {
+    type Error = toml::de::Error;
+    const NAME: &'static str = "TOML";
+
+    fn from_str<T: DeserializeOwned>(string: &str) -> Result<T, Self::Error> {
+        toml::from_str(string)
+    }
+}
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Settings {
@@ -357,6 +370,19 @@ mod tests {
             unknown("network.timout", ["network.timeout", "network.retries"])
                 .contains("network.timeout")
         );
+    }
+
+    #[test]
+    fn toml_1_1_syntax_is_validated_and_loaded_by_the_same_parser() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(
+            directory.path().join("stalelink.toml"),
+            "network = {\n  retries = 4,\n  user-agent = \"a\\eb\",\n}\n",
+        )
+        .unwrap();
+        let settings = resolve(directory.path()).unwrap();
+        assert_eq!(settings.network.retries, 4);
+        assert_eq!(settings.network.user_agent.as_deref(), Some("a\u{1b}b"));
     }
 
     #[test]
