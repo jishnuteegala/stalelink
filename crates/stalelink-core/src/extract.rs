@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io::{Cursor, Read},
     ops::Range,
@@ -597,8 +598,10 @@ fn optional_zip_text(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     name: &str,
 ) -> Result<Option<String>, ExtractError> {
-    let exists = archive.file_names().any(|entry| entry == name);
-    exists.then(|| zip_text(archive, name)).transpose()
+    archive
+        .index_for_name(name)
+        .map(|_| zip_text(archive, name))
+        .transpose()
 }
 
 fn attributes(event: &quick_xml::events::BytesStart<'_>) -> HashMap<String, String> {
@@ -1012,8 +1015,9 @@ fn extract_pptx(
     if slides.is_empty() {
         slides = archive
             .file_names()
+            .flatten()
             .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-            .map(str::to_owned)
+            .map(Cow::into_owned)
             .collect();
         slides.sort_by_key(|path| {
             path.trim_start_matches("ppt/slides/slide")
