@@ -209,6 +209,27 @@ fn unknown_toml_key_is_a_usage_error_with_suggestion() {
 }
 
 #[test]
+fn malformed_toml_is_a_usage_error_naming_the_file_and_line() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[network]
+retries = = 3
+",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("note.txt"), "").unwrap();
+    let mut command = util::command();
+    command
+        .args(["scan", "--no-cache", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "stalelink.toml: TOML parse error at line 2",
+        ));
+}
+
+#[test]
 fn invalid_auth_config_is_a_usage_error() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
