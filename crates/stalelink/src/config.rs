@@ -280,7 +280,7 @@ fn discover(scan_path: &Path) -> Result<Option<PathBuf>, String> {
 fn validate_toml(path: &Path) -> Result<(), String> {
     let source =
         fs::read_to_string(path).map_err(|error| format!("reading {}: {error}", path.display()))?;
-    let value: toml::Value = source
+    let table: toml::Table = source
         .parse()
         .map_err(|error| format!("parsing {}: {error}", path.display()))?;
     let known = [
@@ -304,10 +304,7 @@ fn validate_toml(path: &Path) -> Result<(), String> {
         ("fix", ["write", "backup", "copy"].as_slice()),
         ("output", ["fail-on"].as_slice()),
     ];
-    let Some(table) = value.as_table() else {
-        return Err("config must be a TOML table".into());
-    };
-    for (section, content) in table {
+    for (section, content) in &table {
         let Some((_, keys)) = known.iter().find(|(name, _)| *name == section) else {
             return Err(unknown(section, known.iter().map(|(name, _)| *name)));
         };

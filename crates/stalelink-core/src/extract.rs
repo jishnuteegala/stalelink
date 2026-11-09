@@ -13,7 +13,11 @@ use html5tokenizer::{
 };
 use linkify::{LinkFinder, LinkKind};
 use pulldown_cmark::{Event, LinkType, Parser, Tag};
-use quick_xml::{NsReader, Reader, events::Event as XmlEvent, name::ResolveResult};
+use quick_xml::{
+    NsReader, Reader, XmlVersion,
+    events::{BytesStart, Event as XmlEvent},
+    name::ResolveResult,
+};
 use unicase::UniCase;
 use url::Url;
 
@@ -604,14 +608,13 @@ fn optional_zip_text(
         .transpose()
 }
 
-fn attributes(event: &quick_xml::events::BytesStart<'_>) -> HashMap<String, String> {
+fn attributes(event: &BytesStart<'_>) -> HashMap<String, String> {
     event
         .attributes()
         .flatten()
         .filter_map(|attribute| {
-            let key = std::str::from_utf8(attribute.key.as_ref()).ok()?.to_owned();
-            let value = attribute.unescape_value().ok()?.into_owned();
-            Some((key, value))
+            let value = attribute.normalized_value(XmlVersion::Implicit1_0).ok()?;
+            Some((attribute.key.as_ref().to_owned(), value.into_owned()))
         })
         .collect()
 }
@@ -626,21 +629,17 @@ fn relationships(
     loop {
         match reader.read_event() {
             Ok(XmlEvent::Empty(event)) | Ok(XmlEvent::Start(event))
-                if event.name().as_ref() == b"Relationship" =>
+                if event.name().as_ref() == "Relationship" =>
             {
                 let attributes = event
                     .attributes()
                     .map(|attribute| {
                         let attribute =
                             attribute.map_err(|error| ExtractError(format!("{part}: {error}")))?;
-                        let key = std::str::from_utf8(attribute.key.as_ref())
-                            .map_err(|error| ExtractError(format!("{part}: {error}")))?
-                            .to_owned();
                         let value = attribute
-                            .unescape_value()
-                            .map_err(|error| ExtractError(format!("{part}: {error}")))?
-                            .into_owned();
-                        Ok((key, value))
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .map_err(|error| ExtractError(format!("{part}: {error}")))?;
+                        Ok((attribute.key.as_ref().to_owned(), value.into_owned()))
                     })
                     .collect::<Result<HashMap<_, _>, ExtractError>>()?;
                 if (!external_only
@@ -676,20 +675,20 @@ fn link_from_field(text: &str) -> Option<&str> {
 
 fn resolved_name(
     resolved: &ResolveResult<'_>,
-    event: &quick_xml::events::BytesStart<'_>,
-    namespace: &[u8],
-    local: &[u8],
+    event: &BytesStart<'_>,
+    namespace: &str,
+    local: &str,
 ) -> bool {
     matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == namespace)
         && event.local_name().as_ref() == local
 }
 
-const WORD_NS: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
-const PRESENTATION_NS: &[u8] = b"http://schemas.openxmlformats.org/presentationml/2006/main";
-const DRAWING_NS: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/main";
-const SPREADSHEET_NS: &[u8] = b"http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-const RELATIONSHIPS_NS: &[u8] =
-    b"http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const PRESENTATION_NS: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+const DRAWING_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+const SPREADSHEET_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const RELATIONSHIPS_NS: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
 fn relationship_part(part: &str) -> String {
     let (directory, name) = part.rsplit_once('/').unwrap_or(("", part));
@@ -698,9 +697,9 @@ fn relationship_part(part: &str) -> String {
 
 fn resolved_attribute(
     reader: &NsReader<&[u8]>,
-    event: &quick_xml::events::BytesStart<'_>,
-    namespace: &[u8],
-    local: &[u8],
+    event: &BytesStart<'_>,
+    namespace: &str,
+    local: &str,
 ) -> Option<String> {
     event.attributes().flatten().find_map(|attribute| {
         let (resolved, attribute_local) = reader.resolver().resolve_attribute(attribute.key);
@@ -708,7 +707,7 @@ fn resolved_attribute(
             && attribute_local.as_ref() == local)
             .then(|| {
                 attribute
-                    .unescape_value()
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .ok()
                     .map(|value| value.into_owned())
             })
@@ -764,23 +763,23 @@ fn extract_docx(
     loop {
         match reader.read_resolved_event() {
             Ok((resolved, XmlEvent::Start(event))) | Ok((resolved, XmlEvent::Empty(event))) => {
-                let paragraph_element = resolved_name(&resolved, &event, WORD_NS, b"p");
-                let hyperlink = resolved_name(&resolved, &event, WORD_NS, b"hyperlink");
-                let field_character = resolved_name(&resolved, &event, WORD_NS, b"fldChar");
-                let simple_field = resolved_name(&resolved, &event, WORD_NS, b"fldSimple");
-                let instruction_element = resolved_name(&resolved, &event, WORD_NS, b"instrText");
+                let paragraph_element = resolved_name(&resolved, &event, WORD_NS, "p");
+                let hyperlink = resolved_name(&resolved, &event, WORD_NS, "hyperlink");
+                let field_character = resolved_name(&resolved, &event, WORD_NS, "fldChar");
+                let simple_field = resolved_name(&resolved, &event, WORD_NS, "fldSimple");
+                let instruction_element = resolved_name(&resolved, &event, WORD_NS, "instrText");
                 let _ = resolved;
                 if paragraph_element {
                     paragraph += 1;
                 }
                 if hyperlink
-                    && let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id")
+                    && let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id")
                     && let Some(url) = relations.get(&id)
                 {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
                 }
                 if field_character {
-                    match resolved_attribute(&reader, &event, WORD_NS, b"fldCharType").as_deref() {
+                    match resolved_attribute(&reader, &event, WORD_NS, "fldCharType").as_deref() {
                         Some("begin") => field = Some((paragraph, String::new())),
                         Some("end") => {
                             if let Some((paragraph, instruction)) = field.take()
@@ -793,8 +792,7 @@ fn extract_docx(
                     }
                 }
                 if simple_field
-                    && let Some(instruction) =
-                        resolved_attribute(&reader, &event, WORD_NS, b"instr")
+                    && let Some(instruction) = resolved_attribute(&reader, &event, WORD_NS, "instr")
                     && let Some(url) = link_from_field(&instruction)
                 {
                     links.push(binary_link(doc, url, Location::Docx { paragraph }));
@@ -804,10 +802,7 @@ fn extract_docx(
                 }
             }
             Ok((_, XmlEvent::Text(event))) => {
-                let text = event
-                    .xml_content()
-                    .map_err(|error| ExtractError(error.to_string()))?
-                    .replace("&quot;", "\"");
+                let text = event.xml10_content().replace("&quot;", "\"");
                 if let Some((_, instruction)) = &mut field {
                     instruction.push_str(&text);
                 } else if let Some((_, instruction)) = &mut instruction_text {
@@ -817,10 +812,7 @@ fn extract_docx(
                 }
             }
             Ok((_, XmlEvent::CData(event))) => {
-                let text = event
-                    .decode()
-                    .map_err(|error| ExtractError(error.to_string()))?
-                    .replace("&quot;", "\"");
+                let text = event.replace("&quot;", "\"");
                 if let Some((_, instruction)) = &mut field {
                     instruction.push_str(&text);
                 } else if let Some((_, instruction)) = &mut instruction_text {
@@ -830,10 +822,7 @@ fn extract_docx(
                 }
             }
             Ok((_, XmlEvent::GeneralRef(event))) => {
-                let reference = event
-                    .decode()
-                    .map_err(|error| ExtractError(error.to_string()))?;
-                let reference = if reference == "quot" { "\"" } else { "&" };
+                let reference = if &*event == "quot" { "\"" } else { "&" };
                 if let Some((_, instruction)) = &mut field {
                     instruction.push_str(reference);
                 } else if let Some((_, instruction)) = &mut instruction_text {
@@ -842,7 +831,7 @@ fn extract_docx(
             }
             Ok((resolved, XmlEvent::End(event)))
                 if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == WORD_NS)
-                    && event.local_name().as_ref() == b"instrText" =>
+                    && event.local_name().as_ref() == "instrText" =>
             {
                 if let Some((paragraph, instruction)) = instruction_text.take()
                     && let Some(url) = link_from_field(&instruction)
@@ -872,12 +861,12 @@ fn extract_xlsx(
     loop {
         match reader.read_resolved_event() {
             Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event)))
-                if resolved_name(&resolved, &event, SPREADSHEET_NS, b"sheet") =>
+                if resolved_name(&resolved, &event, SPREADSHEET_NS, "sheet") =>
             {
                 let attributes = attributes(&event);
                 if let (Some(name), Some(id)) = (
                     attributes.get("name"),
-                    resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                    resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id"),
                 ) && let Some(target) = workbook_relations.get(&id)
                 {
                     sheets.push((name.clone(), resolve_target("xl/workbook.xml", target)));
@@ -903,17 +892,17 @@ fn extract_xlsx(
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Start(event))) => {
                     let attributes = attributes(&event);
-                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"c") {
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, "c") {
                         cell = attributes.get("r").cloned().unwrap_or_default();
                     }
-                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"f") {
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, "f") {
                         formula = true;
                         formula_text.clear();
                     }
-                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink")
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, "hyperlink")
                         && let (Some(reference), Some(id)) = (
                             attributes.get("ref"),
-                            resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                            resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id"),
                         )
                         && let Some(url) = relations.get(&id)
                     {
@@ -928,12 +917,12 @@ fn extract_xlsx(
                     }
                 }
                 Ok((resolved, XmlEvent::Empty(event)))
-                    if resolved_name(&resolved, &event, SPREADSHEET_NS, b"hyperlink") =>
+                    if resolved_name(&resolved, &event, SPREADSHEET_NS, "hyperlink") =>
                 {
                     let attributes = attributes(&event);
                     if let (Some(reference), Some(id)) = (
                         attributes.get("ref"),
-                        resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id"),
+                        resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id"),
                     ) && let Some(url) = relations.get(&id)
                     {
                         links.push(binary_link(
@@ -947,21 +936,14 @@ fn extract_xlsx(
                     }
                 }
                 Ok((_, XmlEvent::Text(event))) if formula => {
-                    let text = event
-                        .xml_content()
-                        .map_err(|error| ExtractError(error.to_string()))?
-                        .replace("&quot;", "\"");
-                    formula_text.push_str(&text);
+                    formula_text.push_str(&event.xml10_content().replace("&quot;", "\""));
                 }
                 Ok((_, XmlEvent::GeneralRef(event))) if formula => {
-                    let reference = event
-                        .decode()
-                        .map_err(|error| ExtractError(error.to_string()))?;
-                    formula_text.push_str(if reference == "quot" { "\"" } else { "&" });
+                    formula_text.push_str(if &*event == "quot" { "\"" } else { "&" });
                 }
                 Ok((resolved, XmlEvent::End(event)))
                     if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
-                        && event.local_name().as_ref() == b"f" =>
+                        && event.local_name().as_ref() == "f" =>
                 {
                     if let Some(url) = link_from_field(&formula_text) {
                         links.push(binary_link(
@@ -998,9 +980,9 @@ fn extract_pptx(
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event)))
-                    if resolved_name(&resolved, &event, PRESENTATION_NS, b"sldId") =>
+                    if resolved_name(&resolved, &event, PRESENTATION_NS, "sldId") =>
                 {
-                    if let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id")
+                    if let Some(id) = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id")
                         && let Some(target) = presentation_relations.get(&id)
                     {
                         slides.push(resolve_target("ppt/presentation.xml", target));
@@ -1038,10 +1020,10 @@ fn extract_pptx(
         loop {
             match reader.read_resolved_event() {
                 Ok((resolved, XmlEvent::Empty(event))) | Ok((resolved, XmlEvent::Start(event))) => {
-                    if resolved_name(&resolved, &event, DRAWING_NS, b"hlinkClick")
-                        || resolved_name(&resolved, &event, DRAWING_NS, b"hlinkHover")
+                    if resolved_name(&resolved, &event, DRAWING_NS, "hlinkClick")
+                        || resolved_name(&resolved, &event, DRAWING_NS, "hlinkHover")
                     {
-                        let id = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, b"id");
+                        let id = resolved_attribute(&reader, &event, RELATIONSHIPS_NS, "id");
                         if let Some(id) = id.as_deref()
                             && let Some(url) = relations.get(id)
                         {
