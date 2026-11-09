@@ -17,13 +17,18 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Option<DocFormat> {
     if bytes.starts_with(b"PK\x03\x04")
         && let Ok(archive) = zip::ZipArchive::new(std::io::Cursor::new(bytes))
     {
-        if archive.file_names().any(|name| name.starts_with("word/")) {
+        let has_part = |prefix: &[u8]| {
+            archive
+                .file_names_raw()
+                .any(|name| name.starts_with(prefix))
+        };
+        if has_part(b"word/") {
             return Some(DocFormat::Docx);
         }
-        if archive.file_names().any(|name| name.starts_with("xl/")) {
+        if has_part(b"xl/") {
             return Some(DocFormat::Xlsx);
         }
-        if archive.file_names().any(|name| name.starts_with("ppt/")) {
+        if has_part(b"ppt/") {
             return Some(DocFormat::Pptx);
         }
     }

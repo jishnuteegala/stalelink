@@ -92,15 +92,15 @@ fn pdf(old: &str, bare_text: bool, trailer_extra: &str, catalog_extra: &str) -> 
 fn raw_entry(bytes: &[u8], name: &str) -> Vec<u8> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     let entry = archive.by_name(name).unwrap();
-    bytes[entry.data_start() as usize..(entry.data_start() + entry.compressed_size()) as usize]
-        .to_vec()
+    let start = entry.data_start().unwrap();
+    bytes[start as usize..(start + entry.compressed_size()) as usize].to_vec()
 }
 
 fn raw_local_record(bytes: &[u8], name: &str) -> Vec<u8> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     let entry = archive.by_name(name).unwrap();
-    bytes[entry.header_start() as usize..(entry.data_start() + entry.compressed_size()) as usize]
-        .to_vec()
+    let end = entry.data_start().unwrap() + entry.compressed_size();
+    bytes[entry.header_start() as usize..end as usize].to_vec()
 }
 
 fn raw_central_record(bytes: &[u8], name: &str) -> Vec<u8> {

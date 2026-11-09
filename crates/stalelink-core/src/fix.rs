@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::{Cursor, Read, Write},
     ops::Range,
 };
@@ -75,7 +76,7 @@ impl Fixer for OoxmlFixer {
             let mut entry = source
                 .by_index(index)
                 .map_err(|error| FixError(format!("reading OOXML entry: {error}")))?;
-            let name = entry.name().to_owned();
+            let name = ooxml_entry_name(entry.name())?;
             if !is_ooxml_link_part(&name) {
                 continue;
             }
@@ -103,7 +104,7 @@ impl Fixer for OoxmlFixer {
             let entry = source
                 .by_index(index)
                 .map_err(|error| FixError(format!("reading OOXML entry: {error}")))?;
-            let name = entry.name().to_owned();
+            let name = ooxml_entry_name(entry.name())?;
             if let Some(fixed) = touched.get(&name) {
                 output
                     .start_file(name, zip::write::SimpleFileOptions::default())
@@ -474,6 +475,11 @@ fn xml_subrange(
     Some(range.start + start?..range.start + end?)
 }
 
+fn ooxml_entry_name(name: zip::result::ZipResult<Cow<'_, str>>) -> Result<String, FixError> {
+    name.map(Cow::into_owned)
+        .map_err(|error| FixError(format!("reading OOXML entry name: {error}")))
+}
+
 fn reject_unpreservable_untouched_metadata(
     original: &[u8],
     touched: &std::collections::HashMap<String, Vec<u8>>,
@@ -484,12 +490,11 @@ fn reject_unpreservable_untouched_metadata(
         let entry = archive
             .by_index(index)
             .map_err(|error| FixError(error.to_string()))?;
-        if !touched.contains_key(entry.name())
-            && entry.extra_data().is_some_and(|extra| !extra.is_empty())
+        let name = ooxml_entry_name(entry.name())?;
+        if !touched.contains_key(&name) && entry.extra_data().is_some_and(|extra| !extra.is_empty())
         {
             return Err(FixError(format!(
-                "untouched OOXML entry {} has ZIP extra metadata that cannot be preserved",
-                entry.name()
+                "untouched OOXML entry {name} has ZIP extra metadata that cannot be preserved"
             )));
         }
     }
@@ -1481,7 +1486,7 @@ mod tests {
             .write_all(br#"<Relationship Target="https://old.test/x"/>"#)
             .unwrap();
         let mut options = zip::write::FileOptions::default();
-        options.add_extra_data(0xdead, [1, 2, 3], false).unwrap();
+        options.add_extra_field(0xdead, [1, 2, 3], false).unwrap();
         writer.start_file("word/media/keep.bin", options).unwrap();
         writer.write_all(b"keep").unwrap();
         let original = writer.finish().unwrap().into_inner();
