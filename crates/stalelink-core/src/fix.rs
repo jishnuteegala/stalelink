@@ -525,7 +525,7 @@ fn reject_unpreservable_untouched_metadata(
 }
 
 pub fn pdf_refusal(document: &lopdf::Document) -> Result<(), FixError> {
-    if document.is_encrypted() {
+    if document.is_encrypted() || document.was_encrypted() {
         return Err(FixError("encrypted PDF files are not modified".into()));
     }
     if signed_pdf(document) {
@@ -1561,6 +1561,45 @@ mod tests {
                 .unwrap_err()
                 .0
                 .contains("signed PDF")
+        );
+    }
+
+    #[test]
+    fn pdf_refuses_encrypted_file_that_opens_with_empty_user_password() {
+        let mut document = lopdf::Document::load_mem(&pdf()).unwrap();
+        document.trailer.set(
+            "ID",
+            lopdf::Object::Array(vec![
+                lopdf::Object::string_literal(vec![1; 16]),
+                lopdf::Object::string_literal(vec![2; 16]),
+            ]),
+        );
+        let state = lopdf::EncryptionState::try_from(lopdf::EncryptionVersion::V2 {
+            document: &document,
+            owner_password: "owner",
+            user_password: "",
+            key_length: 128,
+            permissions: lopdf::Permissions::all(),
+        })
+        .unwrap();
+        document.encrypt(&state).unwrap();
+        let mut encrypted = Vec::new();
+        document.save_to(&mut encrypted).unwrap();
+        let finding = binary_finding(
+            DocFormat::Pdf,
+            "https://old.test/x",
+            "https://new.test/y",
+            Location::Pdf {
+                page: 1,
+                annotation: Some(0),
+            },
+        );
+        assert!(
+            PdfFixer
+                .fix(&encrypted, &[finding])
+                .unwrap_err()
+                .0
+                .contains("encrypted PDF")
         );
     }
 
