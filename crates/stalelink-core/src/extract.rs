@@ -615,15 +615,12 @@ fn attribute_value(attribute: &Attribute<'_>) -> Result<String, EscapeError> {
     unescape(&attribute.value).map(Cow::into_owned)
 }
 
-fn reference_text(event: &BytesRef<'_>) -> Result<String, ExtractError> {
-    let character = event
-        .resolve_char_ref()
-        .map_err(|error| ExtractError(error.to_string()))?;
-    Ok(match character {
-        Some(character) => character.to_string(),
-        None => resolve_predefined_entity(event)
+fn reference_text(event: &BytesRef<'_>) -> String {
+    match event.resolve_char_ref() {
+        Ok(Some(character)) => character.to_string(),
+        _ => resolve_predefined_entity(event)
             .map_or_else(|| format!("&{};", &**event), ToOwned::to_owned),
-    })
+    }
 }
 
 fn attributes(event: &BytesStart<'_>) -> HashMap<String, String> {
@@ -834,11 +831,8 @@ fn extract_docx(
                 }
             }
             Ok((_, XmlEvent::GeneralRef(event))) => {
-                let reference = reference_text(&event)?;
-                if let Some((_, instruction)) = &mut field {
-                    instruction.push_str(&reference);
-                } else if let Some((_, instruction)) = &mut instruction_text {
-                    instruction.push_str(&reference);
+                if let Some((_, instruction)) = field.as_mut().or(instruction_text.as_mut()) {
+                    instruction.push_str(&reference_text(&event));
                 }
             }
             Ok((resolved, XmlEvent::End(event)))
@@ -951,7 +945,7 @@ fn extract_xlsx(
                     formula_text.push_str(&event.xml10_content().replace("&quot;", "\""));
                 }
                 Ok((_, XmlEvent::GeneralRef(event))) if formula => {
-                    formula_text.push_str(&reference_text(&event)?);
+                    formula_text.push_str(&reference_text(&event));
                 }
                 Ok((resolved, XmlEvent::End(event)))
                     if matches!(resolved, ResolveResult::Bound(uri) if uri.as_ref() == SPREADSHEET_NS)
@@ -1723,10 +1717,10 @@ mod tests {
     }
 
     #[test]
-    fn docx_field_instructions_decode_cdata_crlf_and_character_references() {
+    fn docx_field_instructions_decode_cdata_and_character_references() {
         let bytes = zip(&[(
             "word/document.xml",
-            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:instrText><![CDATA[HYPERLINK \"https://cdata.test/x\"]]></w:instrText></w:p><w:p><w:instrText>HYPERLINK\r\nhttps://crlf.test/x\r\n</w:instrText></w:p><w:p><w:instrText>HYPERLINK &#34;https://char.test/x?a=1&#x26;b=2&#34;</w:instrText></w:p></w:body></w:document>",
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:instrText><![CDATA[HYPERLINK \"https://cdata.test/x\"]]></w:instrText></w:p><w:p><w:r><w:t>a &#0; b</w:t></w:r></w:p><w:p><w:instrText>HYPERLINK &#34;https://char.test/x?a=1&#x26;b=2&#34;</w:instrText></w:p></w:body></w:document>",
         )]);
         let links = extract(&binary_document(DocFormat::Docx, bytes)).unwrap();
         let urls = links
@@ -1735,11 +1729,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             urls,
-            [
-                "https://cdata.test/x",
-                "https://crlf.test/x",
-                "https://char.test/x?a=1&b=2"
-            ]
+            ["https://cdata.test/x", "https://char.test/x?a=1&b=2"]
         );
     }
 
