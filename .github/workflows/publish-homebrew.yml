@@ -48,8 +48,8 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/homebrew-tap.git" tap
           mkdir -p tap/Formula
           cp stalelink.rb tap/Formula/stalelink.rb
-          git -C tap config user.name github-actions[bot]
-          git -C tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C tap config user.name 'github-actions[bot]'
+          git -C tap config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git -C tap add Formula/stalelink.rb
           git -C tap diff --cached --quiet || git -C tap commit -m "stalelink ${TAG#v}"
           git -C tap push

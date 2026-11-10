@@ -181,11 +181,12 @@ Before re-running, delete the assets that `announce` uploaded from the draft and
 
 ```sh
 tag=v0.2.0
+run_id=12345678901
 gh release view "$tag" --repo jishnuteegala/stalelink --json isDraft,assets \
   --jq 'select(.isDraft) | .assets[].name' \
   | grep -Ev '\.(deb|rpm|apk|pkg\.tar\.zst)$|-linux-packages\.sha256$' \
   | while read -r asset; do gh release delete-asset "$tag" "$asset" --repo jishnuteegala/stalelink --yes; done
-gh run rerun <run-id> --failed
+gh run rerun "$run_id" --failed
 ```
 
 The `select(.isDraft)` filter makes the first command delete nothing once the release is published.

@@ -66,9 +66,10 @@ release; printf '%064d *a.tar.xz\n' 0 > "$tmp/release/a.tar.xz.sha256"
 expect_fail verify_release_artifacts "$tmp/release" "$plan"
 
 channel="$tmp/channel"
-git init -q "$channel"
 : > "$tmp/gitconfig"
-publish() { GIT_CONFIG_GLOBAL="$tmp/gitconfig" GIT_CONFIG_NOSYSTEM=1 commit_channel_update "$channel" "$1" manifest; }
+export GIT_CONFIG_GLOBAL="$tmp/gitconfig" GIT_CONFIG_NOSYSTEM=1
+git init -q "$channel"
+publish() { commit_channel_update "$channel" "$1" manifest; }
 printf '1\n' > "$channel/manifest"
 publish 'stalelink 1' >/dev/null
 publish 'stalelink 1 again'

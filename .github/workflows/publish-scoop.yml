@@ -41,9 +41,10 @@ jobs:
       TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
       GH_TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
     steps:
+      # Deliberately checks out the workflow's own ref (not the release tag)
+      # so packaging-script fixes apply when re-publishing older tags.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
       - name: Generate and push manifest
         run: |
