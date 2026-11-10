@@ -8,10 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
@@ -83,6 +88,7 @@ jobs:
         run: echo 'namcap requires an Arch environment; bash -n validates the rendered PKGBUILD here.'
 
   release-plz-dry-run:
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -94,7 +100,7 @@ jobs:
       # PR checkouts are detached; release-plz needs a branch with an upstream.
       - run: |
           git checkout -B release-plz-dry-run
-          git branch --set-upstream-to "origin/${GITHUB_BASE_REF:-main}" release-plz-dry-run
+          git branch --set-upstream-to "origin/$GITHUB_BASE_REF" release-plz-dry-run
       - uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
         with:
           command: release
@@ -102,3 +108,13 @@ jobs:
           dry_run: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  ci-ok:
+    needs: [test, npm-installer, dist-plan, distribution-templates, release-plz-dry-run]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to pass
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
