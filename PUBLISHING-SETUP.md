@@ -59,10 +59,10 @@ workflow. `publish-npm-oidc.yml` cannot be dispatched independently.
 
 The initial bootstrap happens before the first release. Merge the release PR
 after it completes; the real `0.1.0` release then publishes with OIDC and npm
-provenance. The workflow tolerates npm E404 only as a recovery fallback: it
-emits a prominent warning and allows the release to become public without an
-npm package. Bootstrap before the first release rather than relying on this
-fallback.
+provenance. npm publishes after the GitHub Release is public, so an npm
+failure never holds the release in draft. The job tolerates npm E404 only as a
+recovery fallback: it stays green and writes a warning to the job summary.
+Bootstrap before the first release rather than relying on this fallback.
 
 Set publishing access to require 2FA and disallow tokens; OIDC trusted
 publishing is unaffected:
@@ -165,8 +165,22 @@ After every release:
 7. Confirm Chocolatey is approved and its verifier/scan results pass.
 8. Confirm `stalelink-core` and `stalelink` appear at the expected crates.io versions.
 
-Use **Actions -> Release -> Run workflow** with an existing immutable `v*` tag
-to retry the cargo-dist release path. It must never create a new version.
+Before announce, the **Release** workflow checks that every planned artifact
+exists, that `sha256.sum` lists every archive and matches, and that each
+native binary reports the release version. That check and the nFPM Linux
+packages gate the GitHub Release; every other package channel runs after it is
+public.
+
+A release that fails after tagging is fixed on `main` and shipped as the next
+patch version. Do not re-dispatch the **Release** workflow from `main` for an
+existing tag: that builds a different commit than the tag points to.
+
+A single package channel that fails after the GitHub Release is public can be
+re-run on its own. Use **Actions -> Publish ... -> Run workflow** with the tag
+for Homebrew, Scoop, AUR, WinGet and Chocolatey. npm has no dispatch entry,
+because its trusted publisher is bound to `release.yml`; re-run the failed npm
+job in the Release run (`gh run rerun <run-id> --failed`) within GitHub's
+30-day re-run window. Channel dispatches refuse prereleases.
 
 ## Rotation and incident response
 

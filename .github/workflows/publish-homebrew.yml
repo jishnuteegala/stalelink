@@ -6,6 +6,14 @@ on:
       plan:
         required: true
         type: string
+  # Allows re-publishing a single channel without re-running the whole
+  # release pipeline (which is not idempotent past announce).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (e.g. v0.1.0)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,29 +28,28 @@ jobs:
         env:
           TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
         run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  prerelease-gate:
+    uses: ./.github/workflows/prerelease-gate.yml
+    with:
+      plan: ${{ inputs.plan }}
+      tag: ${{ inputs.tag }}
   publish:
-    needs: credentials
-    if: needs.credentials.outputs.available == 'true'
+    needs: [credentials, prerelease-gate]
+    if: needs.credentials.outputs.available == 'true' && needs.prerelease-gate.outputs.allowed == 'true'
     runs-on: ubuntu-22.04
     env:
+      TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
       GH_TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
-      PLAN: ${{ inputs.plan }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: artifacts-*
-          path: Formula
-          merge-multiple: true
       - name: Push cargo-dist-generated formula
         run: |
           set -euo pipefail
-          formula="$(find Formula -maxdepth 1 -type f -name '*.rb' -print -quit)"
-          test -n "$formula"
+          gh release download "$TAG" --repo jishnuteegala/stalelink --pattern stalelink.rb --dir .
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/homebrew-tap.git" tap
           mkdir -p tap/Formula
-          cp "$formula" tap/Formula/stalelink.rb
+          cp stalelink.rb tap/Formula/stalelink.rb
           git -C tap config user.name github-actions[bot]
           git -C tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git -C tap add Formula/stalelink.rb
-          git -C tap commit -m "stalelink $(echo "$PLAN" | jq -r '.releases[0].app_version')"
+          git -C tap commit -m "stalelink ${TAG#v}"
           git -C tap push

@@ -1,0 +1,46 @@
+name: Prerelease gate
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: dist plan JSON when called from release.yml; empty on a channel dispatch
+        type: string
+        default: ""
+      tag:
+        description: Release tag of a channel dispatch
+        type: string
+        default: ""
+    outputs:
+      allowed:
+        description: Whether the channel may publish this release
+        value: ${{ jobs.check.outputs.allowed }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    outputs:
+      allowed: ${{ steps.check.outputs.allowed }}
+    steps:
+      - id: check
+        env:
+          PLAN: ${{ inputs.plan }}
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PLAN" ]; then
+            # The rule release.yml generates for publish jobs, which dist does
+            # not apply to post-announce jobs.
+            allowed="$(jq -r '(.announcement_is_prerelease | not) or .publish_prereleases' <<<"$PLAN")"
+          else
+            allowed="$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease | not')"
+          fi
+          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
+          if [ "$allowed" != true ]; then
+            echo "Prerelease: this channel does not publish it." >> "$GITHUB_STEP_SUMMARY"
+          fi

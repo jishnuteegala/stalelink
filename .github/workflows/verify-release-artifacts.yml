@@ -1,0 +1,66 @@
+name: Verify release artifacts
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  checksums:
+    runs-on: ubuntu-22.04
+    env:
+      PLAN: ${{ inputs.plan }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Check artifacts against sha256.sum
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          jq -r '.releases[].artifacts[]' <<<"$PLAN" | while read -r name; do
+            test -s "$name" || { echo "::error::release artifact $name is missing or empty"; exit 1; }
+          done
+          jq -r '.artifacts[] | select(.kind == "executable-zip") | .name' <<<"$PLAN" | while read -r name; do
+            awk -v a="$name" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' sha256.sum \
+              || { echo "::error::sha256.sum does not list $name"; exit 1; }
+          done
+          sha256sum --check --strict sha256.sum
+          jq -r '.artifacts[] | select(.kind == "checksum") | .name' <<<"$PLAN" | while read -r name; do
+            sha256sum --check --strict "$name"
+          done
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(inputs.plan).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: artifacts
+      - name: Run the built binary
+        if: contains(matrix.targets, matrix.host)
+        shell: bash
+        env:
+          EXPECTED: stalelink ${{ fromJson(inputs.plan).releases[0].app_version }}
+        run: |
+          set -euo pipefail
+          archive="$(find artifacts -maxdepth 1 -type f \( -name '*.tar.xz' -o -name '*.zip' \) -print -quit)"
+          test -n "$archive"
+          mkdir unpack
+          case "$archive" in
+            *.zip) pwsh -NoProfile -Command "Expand-Archive -LiteralPath '$archive' -DestinationPath unpack" ;;
+            *) tar -xJf "$archive" -C unpack ;;
+          esac
+          binary="$(find unpack -type f \( -name stalelink -o -name stalelink.exe \) -print -quit)"
+          test -n "$binary"
+          actual="$("$binary" --version | tr -d '\r')"
+          test "$actual" = "$EXPECTED" || { echo "::error::$archive: expected '$EXPECTED', got '$actual'"; exit 1; }

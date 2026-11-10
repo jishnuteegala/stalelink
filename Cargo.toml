@@ -30,19 +30,22 @@ npm-package = "stalelink"
 npm-scope = "@jishnuteegala"
 # cargo-dist owns release.yml. Custom entries below are reusable workflows.
 host-jobs = ["./create-draft-release"]
-publish-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-nfpm"]
+# Publish jobs gate announce; optional channels run after it so one failing
+# channel cannot hold the GitHub Release in draft. dist does not skip
+# prereleases for post-announce jobs, so each channel workflow gates itself.
+publish-jobs = ["./verify-release-artifacts", "./publish-nfpm"]
 # Caller jobs must grant a superset of each reusable workflow's declared
 # permissions; the dist default (id-token+packages) omits contents and fails
 # GitHub's startup validation. Overrides replace the defaults entirely.
-github-custom-job-permissions = { "publish-homebrew" = { contents = "read" }, "publish-npm-oidc" = { contents = "read", id-token = "write" }, "publish-nfpm" = { contents = "write" } }
-post-announce-jobs = ["./publish-scoop", "./publish-aur", "./publish-winget", "./publish-chocolatey"]
+github-custom-job-permissions = { "verify-release-artifacts" = { contents = "read" }, "publish-homebrew" = { contents = "read" }, "publish-npm-oidc" = { contents = "read", id-token = "write" }, "publish-nfpm" = { contents = "write" } }
+post-announce-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-scoop", "./publish-aur", "./publish-winget", "./publish-chocolatey"]
 # cargo-dist's native Homebrew publisher writes this formula to the tap.
 tap = "jishnuteegala/homebrew-tap"
 formula = "stalelink"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-# A custom host job creates the draft before core publishers; cargo-dist uploads
-# artifacts and undrafts it in announce after those jobs complete.
+# A custom host job creates the draft before nFPM uploads into it; cargo-dist
+# uploads artifacts and undrafts it in announce after the publish jobs complete.
 create-release = false
 github-release = "announce"
 # Whether to enable GitHub Attestations

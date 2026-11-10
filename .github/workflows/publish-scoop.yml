@@ -28,9 +28,14 @@ jobs:
         env:
           TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
         run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  prerelease-gate:
+    uses: ./.github/workflows/prerelease-gate.yml
+    with:
+      plan: ${{ inputs.plan }}
+      tag: ${{ inputs.tag }}
   publish:
-    needs: credentials
-    if: needs.credentials.outputs.available == 'true'
+    needs: [credentials, prerelease-gate]
+    if: needs.credentials.outputs.available == 'true' && needs.prerelease-gate.outputs.allowed == 'true'
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
