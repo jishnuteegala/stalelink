@@ -6,14 +6,14 @@ source "$root/packaging/scripts/channel-lib.sh"
 fixture="$root/packaging/fixtures/cargo-dist-assets.txt"
 checksum_fixture="$root/packaging/fixtures/sha256.sum"
 
-for asset in $(cat "$fixture"); do
+while read -r asset; do
   case "$asset" in
     *.sha256|sha256.sum|*.tar.gz|*.ps1|*.sh) continue ;;
   esac
   if [[ "$asset" == stalelink-* ]]; then
     require_release_checksum "$checksum_fixture" "$asset" >/dev/null
   fi
-done
+done < "$fixture"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
