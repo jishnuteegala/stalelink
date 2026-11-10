@@ -40,9 +40,9 @@ jobs:
           if [ -n "$PLAN" ]; then
             allowed="$(release_allowed "$PLAN")"
           else
-            allowed="$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease | not')"
+            allowed="$(gh release view "$TAG" --json isPrerelease,isDraft --jq '(.isPrerelease or .isDraft) | not')"
           fi
           echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
           if [ "$allowed" != true ]; then
-            echo "Prerelease: this channel does not publish it." >> "$GITHUB_STEP_SUMMARY"
+            echo "This release is a prerelease or a draft, so this channel does not publish it." >> "$GITHUB_STEP_SUMMARY"
           fi

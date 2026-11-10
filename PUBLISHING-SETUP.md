@@ -191,7 +191,7 @@ job** on `custom-publish-npm-oidc / publish`, or
 This also works after an E404 bootstrap fallback, whose job is green. Do not
 re-run all jobs: the published release cannot take the pre-announce uploads a
 second time, so the run stops before npm. Channel dispatches refuse
-prereleases.
+prereleases and drafts.
 
 ## Rotation and incident response
 

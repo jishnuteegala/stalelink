@@ -41,7 +41,7 @@ publish-jobs = ["./verify-release-artifacts", "./publish-nfpm"]
 # GitHub's startup validation. Overrides replace the defaults entirely.
 github-custom-job-permissions = { "verify-release-artifacts" = { contents = "read" }, "publish-homebrew" = { contents = "read" }, "publish-npm-oidc" = { contents = "read", id-token = "write" }, "publish-nfpm" = { contents = "write" } }
 post-announce-jobs = ["./publish-homebrew", "./publish-npm-oidc", "./publish-scoop", "./publish-aur", "./publish-winget", "./publish-chocolatey"]
-# cargo-dist's native Homebrew publisher writes this formula to the tap.
+# dist generates this formula; publish-homebrew.yml pushes it to the tap.
 tap = "jishnuteegala/homebrew-tap"
 formula = "stalelink"
 # Target platforms to build apps for (Rust target-triple syntax)

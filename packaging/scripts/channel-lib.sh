@@ -19,20 +19,20 @@ require_release_checksum() {
 # The prerelease rule release.yml generates for publish jobs; dist does not
 # apply it to post-announce jobs, so channel workflows apply it themselves.
 release_allowed() {
-  jq -r '(.announcement_is_prerelease | not) or .publish_prereleases' <<<"$1"
+  jq -r '(.announcement_is_prerelease | not) or .publish_prereleases' <<<"$1" | tr -d '\r'
 }
 
 verify_release_artifacts() {
   local dir=$1 plan=$2 names name
-  names="$(jq -er '.releases[].artifacts[]' <<<"$plan")" || return 1
+  names="$(jq -er '.releases[].artifacts[]' <<<"$plan" | tr -d '\r')" || return 1
   for name in $names; do
     test -s "$dir/$name" || { printf 'release artifact %s is missing or empty\n' "$name" >&2; return 1; }
   done
-  names="$(jq -er '.artifacts[] | select(.kind == "executable-zip") | .name' <<<"$plan")" || return 1
+  names="$(jq -er '.artifacts[] | select(.kind == "executable-zip") | .name' <<<"$plan" | tr -d '\r')" || return 1
   for name in $names; do
     require_release_checksum "$dir/sha256.sum" "$name" >/dev/null || return 1
   done
-  names="$(jq -er '.artifacts[] | select(.kind == "checksum" or .kind == "unified-checksum") | .name' <<<"$plan")" || return 1
+  names="$(jq -er '.artifacts[] | select(.kind == "checksum" or .kind == "unified-checksum") | .name' <<<"$plan" | tr -d '\r')" || return 1
   for name in $names; do
     # dist ends every checksum file with a blank line, which --strict rejects.
     (cd "$dir" && grep . "$name" | sha256sum --check --strict) || { printf '%s does not verify\n' "$name" >&2; return 1; }
