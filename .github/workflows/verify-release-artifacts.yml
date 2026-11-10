@@ -32,9 +32,9 @@ jobs:
             awk -v a="$name" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' sha256.sum \
               || { echo "::error::sha256.sum does not list $name"; exit 1; }
           done
-          sha256sum --check --strict sha256.sum
-          jq -r '.artifacts[] | select(.kind == "checksum") | .name' <<<"$PLAN" | while read -r name; do
-            sha256sum --check --strict "$name"
+          # dist ends every checksum file with a blank line, which --strict rejects.
+          jq -r '.artifacts[] | select(.kind == "checksum" or .kind == "unified-checksum") | .name' <<<"$PLAN" | while read -r name; do
+            grep . "$name" | sha256sum --check --strict
           done
   smoke:
     strategy:

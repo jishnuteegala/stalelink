@@ -167,8 +167,12 @@ After every release:
 
 Before announce, the **Release** workflow checks that every planned artifact
 exists, that `sha256.sum` lists every archive and matches, and that each
-native binary reports the release version. That check and the nFPM Linux
-packages gate the GitHub Release; every other package channel runs after it is
+native binary reports the release version. Prereleases skip this check, like
+every publish job. The nFPM Linux packages are also built before announce and
+uploaded to the draft, because an immutable release accepts no new assets
+once it is published. If either fails, the release stays in draft; after a
+transient failure, re-run the failed jobs of that Release run
+(`gh run rerun <run-id> --failed`) to finish the same draft. Every other package channel runs after the GitHub Release is
 public.
 
 A release that fails after tagging is fixed on `main` and shipped as the next
@@ -178,9 +182,11 @@ existing tag: that builds a different commit than the tag points to.
 A single package channel that fails after the GitHub Release is public can be
 re-run on its own. Use **Actions -> Publish ... -> Run workflow** with the tag
 for Homebrew, Scoop, AUR, WinGet and Chocolatey. npm has no dispatch entry,
-because its trusted publisher is bound to `release.yml`; re-run the failed npm
-job in the Release run (`gh run rerun <run-id> --failed`) within GitHub's
-30-day re-run window. Channel dispatches refuse prereleases.
+because its trusted publisher is bound to `release.yml`; re-run only the
+failed npm job in the Release run (`gh run rerun <run-id> --failed`) within
+GitHub's 30-day re-run window. Re-running all jobs does not reach npm again,
+because the published release cannot take the pre-announce uploads a second
+time. Channel dispatches refuse prereleases.
 
 ## Rotation and incident response
 
