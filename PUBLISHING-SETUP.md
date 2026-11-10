@@ -172,21 +172,26 @@ every publish job. The nFPM Linux packages are also built before announce and
 uploaded to the draft, because an immutable release accepts no new assets
 once it is published. If either fails, the release stays in draft; after a
 transient failure, re-run the failed jobs of that Release run
-(`gh run rerun <run-id> --failed`) to finish the same draft. Every other package channel runs after the GitHub Release is
-public.
+(`gh run rerun <run-id> --failed`) to finish the same draft. Every other
+package channel runs after the GitHub Release is public.
 
 A release that fails after tagging is fixed on `main` and shipped as the next
 patch version. Do not re-dispatch the **Release** workflow from `main` for an
-existing tag: that builds a different commit than the tag points to.
+existing tag: that builds a different commit than the tag points to. The
+failed tag stays, because the `v*` tag ruleset blocks deleting it; delete its
+leftover draft release so only shipped versions remain.
 
 A single package channel that fails after the GitHub Release is public can be
 re-run on its own. Use **Actions -> Publish ... -> Run workflow** with the tag
 for Homebrew, Scoop, AUR, WinGet and Chocolatey. npm has no dispatch entry,
-because its trusted publisher is bound to `release.yml`; re-run only the
-failed npm job in the Release run (`gh run rerun <run-id> --failed`) within
-GitHub's 30-day re-run window. Re-running all jobs does not reach npm again,
-because the published release cannot take the pre-announce uploads a second
-time. Channel dispatches refuse prereleases.
+because its trusted publisher is bound to `release.yml`. To retry npm, re-run
+only its job in the Release run within GitHub's 30-day re-run window: **Re-run
+job** on `custom-publish-npm-oidc / publish`, or
+`gh run rerun --job <job-id>` with the ID from `gh run view <run-id> --json jobs`.
+This also works after an E404 bootstrap fallback, whose job is green. Do not
+re-run all jobs: the published release cannot take the pre-announce uploads a
+second time, so the run stops before npm. Channel dispatches refuse
+prereleases.
 
 ## Rotation and incident response
 

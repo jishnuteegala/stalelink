@@ -47,7 +47,7 @@ jobs:
             if grep -q 'E404' "$RUNNER_TEMP/npm-publish.log"; then
               message="npm trusted publishing is not configured, so stalelink was not published to npm. Complete the bootstrap, then re-run this job."
               echo "::warning::$message"
-              echo "$message" >> "$GITHUB_STEP_SUMMARY"
+              echo "**Warning:** $message" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             exit "$status"

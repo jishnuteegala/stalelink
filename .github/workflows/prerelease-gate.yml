@@ -25,6 +25,9 @@ jobs:
     outputs:
       allowed: ${{ steps.check.outputs.allowed }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - id: check
         env:
           PLAN: ${{ inputs.plan }}
@@ -33,10 +36,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          source packaging/scripts/channel-lib.sh
           if [ -n "$PLAN" ]; then
-            # The rule release.yml generates for publish jobs, which dist does
-            # not apply to post-announce jobs.
-            allowed="$(jq -r '(.announcement_is_prerelease | not) or .publish_prereleases' <<<"$PLAN")"
+            allowed="$(release_allowed "$PLAN")"
           else
             allowed="$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease | not')"
           fi

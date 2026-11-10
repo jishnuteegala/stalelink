@@ -13,29 +13,22 @@ permissions:
 jobs:
   checksums:
     runs-on: ubuntu-22.04
-    env:
-      PLAN: ${{ inputs.plan }}
     steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: artifacts-*
           path: artifacts
           merge-multiple: true
       - name: Check artifacts against sha256.sum
-        working-directory: artifacts
+        env:
+          PLAN: ${{ inputs.plan }}
         run: |
           set -euo pipefail
-          jq -r '.releases[].artifacts[]' <<<"$PLAN" | while read -r name; do
-            test -s "$name" || { echo "::error::release artifact $name is missing or empty"; exit 1; }
-          done
-          jq -r '.artifacts[] | select(.kind == "executable-zip") | .name' <<<"$PLAN" | while read -r name; do
-            awk -v a="$name" '$2 == a || $2 == "*" a { found = 1 } END { exit !found }' sha256.sum \
-              || { echo "::error::sha256.sum does not list $name"; exit 1; }
-          done
-          # dist ends every checksum file with a blank line, which --strict rejects.
-          jq -r '.artifacts[] | select(.kind == "checksum" or .kind == "unified-checksum") | .name' <<<"$PLAN" | while read -r name; do
-            grep . "$name" | sha256sum --check --strict
-          done
+          source packaging/scripts/channel-lib.sh
+          verify_release_artifacts artifacts "${PLAN:?}"
   smoke:
     strategy:
       fail-fast: false

@@ -30,9 +30,11 @@ npm-package = "stalelink"
 npm-scope = "@jishnuteegala"
 # cargo-dist owns release.yml. Custom entries below are reusable workflows.
 host-jobs = ["./create-draft-release"]
-# Publish jobs gate announce; optional channels run after it so one failing
-# channel cannot hold the GitHub Release in draft. dist does not skip
-# prereleases for post-announce jobs, so each channel workflow gates itself.
+# Publish jobs gate announce. nFPM uploads into the draft because immutable
+# releases take no assets after publishing; the other channels run after
+# announce so one failing channel cannot hold the GitHub Release in draft.
+# dist does not skip prereleases for post-announce jobs, so each channel
+# workflow gates itself.
 publish-jobs = ["./verify-release-artifacts", "./publish-nfpm"]
 # Caller jobs must grant a superset of each reusable workflow's declared
 # permissions; the dist default (id-token+packages) omits contents and fails

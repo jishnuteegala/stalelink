@@ -65,7 +65,7 @@ jobs:
               # must be bootstrapped interactively with `komac new` or a manual PR.
               $message = "jishnuteegala.stalelink is not in winget-pkgs yet, so no manifest was submitted. Bootstrap the first manifest manually (komac new jishnuteegala.stalelink), then future releases will submit update PRs automatically."
               Write-Host "::warning::$message"
-              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $message
+              Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "**Warning:** $message"
               exit 0
             }
             exit $LASTEXITCODE
