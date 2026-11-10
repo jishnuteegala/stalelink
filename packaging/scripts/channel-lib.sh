@@ -39,6 +39,16 @@ verify_release_artifacts() {
   done
 }
 
+# Republishing an unchanged version must succeed, so an identical tree is not committed.
+commit_channel_update() {
+  local repo=$1 message=$2
+  shift 2
+  git -C "$repo" config user.name 'github-actions[bot]'
+  git -C "$repo" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+  git -C "$repo" add -- "$@"
+  git -C "$repo" diff --cached --quiet || git -C "$repo" commit -m "$message"
+}
+
 render_scoop_manifest() {
   local output=$1 version=$2 x64_url=$3 x64_sha256=$4 arm64_url=$5 arm64_sha256=$6
   node - "$output" "$version" "$x64_url" "$x64_sha256" "$arm64_url" "$arm64_sha256" <<'NODE'

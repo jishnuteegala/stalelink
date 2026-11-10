@@ -57,8 +57,5 @@ jobs:
           arm64_sha256="$(require_release_checksum sha256.sum "$arm64_asset")"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/scoop-bucket.git" bucket
           render_scoop_manifest bucket/stalelink.json "$version" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${x64_asset}" "$x64_sha256" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${arm64_asset}" "$arm64_sha256"
-          git -C bucket config user.name github-actions[bot]
-          git -C bucket config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C bucket add stalelink.json
-          git -C bucket commit -m "stalelink ${version}"
+          commit_channel_update bucket "stalelink ${version}" stalelink.json
           git -C bucket push

@@ -64,3 +64,15 @@ release; printf 'not a checksum line\n' >> "$tmp/release/sha256.sum"
 expect_fail verify_release_artifacts "$tmp/release" "$plan"
 release; printf '%064d *a.tar.xz\n' 0 > "$tmp/release/a.tar.xz.sha256"
 expect_fail verify_release_artifacts "$tmp/release" "$plan"
+
+channel="$tmp/channel"
+git init -q "$channel"
+: > "$tmp/gitconfig"
+publish() { GIT_CONFIG_GLOBAL="$tmp/gitconfig" GIT_CONFIG_NOSYSTEM=1 commit_channel_update "$channel" "$1" manifest; }
+printf '1\n' > "$channel/manifest"
+publish 'stalelink 1' >/dev/null
+publish 'stalelink 1 again'
+test "$(git -C "$channel" rev-list --count HEAD)" = 1
+printf '2\n' > "$channel/manifest"
+publish 'stalelink 2' >/dev/null
+test "$(git -C "$channel" log --format=%s | tr '\n' ,)" = 'stalelink 2,stalelink 1,'
