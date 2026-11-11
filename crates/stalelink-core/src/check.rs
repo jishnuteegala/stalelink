@@ -1620,6 +1620,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_fallbacks_start_from_the_link_not_the_head_redirects() {
+        let server = MockServer::start().await;
+        mount_method(&server, "HEAD", "/start", redirect(302, "/login")).await;
+        mount_method(&server, "HEAD", "/login", ResponseTemplate::new(405)).await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(check_route(&server, "/start").await.is_none());
+    }
+
+    #[tokio::test]
     async fn head_redirects_do_not_count_toward_get_loop_detection() {
         let server = MockServer::start().await;
         mount_method(&server, "HEAD", "/a", redirect(302, "/b")).await;
