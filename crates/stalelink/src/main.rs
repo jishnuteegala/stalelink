@@ -923,16 +923,18 @@ fn print_diff(path: &Path, original: &[u8], fixed: &[u8], color: Color) {
 }
 
 fn write_report(
-    mut writer: impl Write,
+    writer: impl Write,
     format: OutputFormat,
     report: &stalelink_core::scan::ScanReport,
     exit_code: u8,
 ) -> io::Result<()> {
+    let mut writer = io::BufWriter::new(writer);
     match format {
         OutputFormat::Table => TableSink(&mut writer).emit(report),
         OutputFormat::Json => output::write_json(&mut writer, report),
         OutputFormat::Sarif => output::write_sarif(&mut writer, report, exit_code),
-    }
+    }?;
+    writer.flush()
 }
 
 fn cache_path(configured: Option<&std::path::Path>) -> PathBuf {

@@ -1,8 +1,7 @@
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    io::{BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
+    sync::{Arc, Condvar, Mutex},
     time::{Duration, Instant},
 };
 
@@ -14,7 +13,7 @@ use stalelink_core::{
     walk::WalkOptions,
 };
 use wiremock::{
-    Mock, MockServer, Request, Respond, ResponseTemplate,
+    Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
 
@@ -31,21 +30,59 @@ async fn serve(routes: &[(&str, u16)]) -> MockServer {
     server
 }
 
-struct OverlappingResponder {
-    active: Arc<AtomicUsize>,
-    max_active: Arc<AtomicUsize>,
+const RENDEZVOUS_DEADLINE: Duration = Duration::from_secs(30);
+
+#[derive(Default)]
+struct HeldRequests {
+    in_flight: usize,
+    most_in_flight: usize,
 }
 
-impl Respond for OverlappingResponder {
-    fn respond(&self, _: &Request) -> ResponseTemplate {
-        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.max_active.fetch_max(active, Ordering::SeqCst);
-        let active = Arc::clone(&self.active);
+#[derive(Default)]
+struct Rendezvous {
+    requests: Mutex<HeldRequests>,
+    paired: Condvar,
+}
+
+impl Rendezvous {
+    fn serve() -> (String, Arc<Self>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let rendezvous = Arc::new(Self::default());
+        let server = Arc::clone(&rendezvous);
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(600));
-            active.fetch_sub(1, Ordering::SeqCst);
+            for stream in listener.incoming().take(2) {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || server.respond_404_once_paired(stream.unwrap()));
+            }
         });
-        ResponseTemplate::new(404).set_delay(Duration::from_millis(600))
+        (uri, rendezvous)
+    }
+
+    fn respond_404_once_paired(&self, mut stream: TcpStream) {
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 2 {
+            line.clear();
+        }
+        let mut requests = self.requests.lock().unwrap();
+        requests.in_flight += 1;
+        requests.most_in_flight = requests.most_in_flight.max(requests.in_flight);
+        self.paired.notify_all();
+        let (mut requests, _) = self
+            .paired
+            .wait_timeout_while(requests, RENDEZVOUS_DEADLINE, |requests| {
+                requests.most_in_flight < 2
+            })
+            .unwrap();
+        requests.in_flight -= 1;
+        drop(requests);
+        let _ = stream
+            .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    }
+
+    fn most_in_flight(&self) -> usize {
+        self.requests.lock().unwrap().most_in_flight
     }
 }
 
@@ -760,26 +797,18 @@ async fn environment_ignore_vectors_override_toml() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn concurrent_scans_keep_the_wal_cache_readable() {
-    let server = MockServer::start().await;
-    let active = Arc::new(AtomicUsize::new(0));
-    let max_active = Arc::new(AtomicUsize::new(0));
-    Mock::given(method("HEAD"))
-        .respond_with(OverlappingResponder {
-            active,
-            max_active: Arc::clone(&max_active),
-        })
-        .mount(&server)
-        .await;
+#[test]
+fn concurrent_scans_keep_the_wal_cache_readable() {
+    let (uri, rendezvous) = Rendezvous::serve();
     let directory = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     let mut paths = Vec::new();
     for name in ["first", "second"] {
         let path = directory.path().join(format!("{name}.txt"));
-        std::fs::write(&path, format!("{server}/{name}", server = server.uri())).unwrap();
+        std::fs::write(&path, format!("{uri}/{name}")).unwrap();
         paths.push(path);
     }
+    let timeout = (RENDEZVOUS_DEADLINE * 2).as_secs().to_string();
     let mut children = Vec::new();
     for path in paths {
         let mut command = util::child_command();
@@ -787,18 +816,16 @@ async fn concurrent_scans_keep_the_wal_cache_readable() {
             "scan",
             "--retries",
             "0",
+            "--timeout",
+            &timeout,
             path.to_str().unwrap(),
         ]);
         children.push(command.spawn().unwrap());
     }
     for mut child in children {
-        assert_eq!(
-            tokio::task::block_in_place(|| child.wait()).unwrap().code(),
-            Some(1)
-        );
+        assert_eq!(child.wait().unwrap().code(), Some(1));
     }
-    assert!(server.received_requests().await.unwrap().len() >= 2);
-    assert!(max_active.load(Ordering::SeqCst) >= 2);
+    assert!(rendezvous.most_in_flight() >= 2);
     let connection = rusqlite::Connection::open(cache.path().join("verdicts.sqlite3")).unwrap();
     assert_eq!(
         connection
@@ -806,12 +833,12 @@ async fn concurrent_scans_keep_the_wal_cache_readable() {
             .unwrap(),
         "ok"
     );
-    assert!(
+    assert_eq!(
         connection
             .query_row("SELECT COUNT(*) FROM verdicts", [], |row| row
                 .get::<_, u64>(0))
-            .unwrap()
-            >= 1
+            .unwrap(),
+        2
     );
 }
 
