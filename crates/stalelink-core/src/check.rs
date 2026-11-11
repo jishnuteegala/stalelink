@@ -38,7 +38,7 @@ pub trait Checker: Send + Sync {
 enum SiblingProbe {
     Body(Url, Arc<str>),
     NoBody,
-    Transient,
+    Inconclusive,
 }
 
 #[derive(Default)]
@@ -60,7 +60,7 @@ impl SiblingProbes {
                 self.body_bytes += body.len();
             }
             SiblingProbe::NoBody => {}
-            SiblingProbe::Body(..) | SiblingProbe::Transient => {
+            SiblingProbe::Body(..) | SiblingProbe::Inconclusive => {
                 self.cells.remove(directory);
             }
         }
@@ -202,12 +202,12 @@ impl HttpChecker {
     }
     async fn probe_sibling(&self, probe: Url) -> SiblingProbe {
         match self.raw_get(probe.clone()).await {
-            Ok(response) if !response.terminated => SiblingProbe::Transient,
+            Ok(response) if !response.terminated => SiblingProbe::Inconclusive,
             Ok(response) if response.status.is_success() => {
                 SiblingProbe::Body(probe, response.body.into())
             }
             Ok(response) if !transient_status(response.status) => SiblingProbe::NoBody,
-            _ => SiblingProbe::Transient,
+            _ => SiblingProbe::Inconclusive,
         }
     }
     // Every probe requests a random missing path, so one probe answers for
@@ -230,7 +230,7 @@ impl HttpChecker {
             .clone();
         match result {
             SiblingProbe::Body(probe, body) => Some((probe, body)),
-            SiblingProbe::NoBody | SiblingProbe::Transient => None,
+            SiblingProbe::NoBody | SiblingProbe::Inconclusive => None,
         }
     }
     async fn heuristic(&self, response: RawResponse) -> Option<Verdict> {
@@ -794,8 +794,6 @@ mod tests {
     #[tokio::test]
     async fn links_share_one_in_flight_probe_whatever_it_returns() {
         let soft = "Not found: choose another document";
-        // A 503 is transient, and a 301 without a location never reaches a
-        // final response.
         for (status, expected) in [
             (200, Some(Reason::Soft404)),
             (404, None),
@@ -873,8 +871,6 @@ mod tests {
     #[tokio::test]
     async fn retries_a_probe_after_an_inconclusive_result() {
         let soft = "Not found: choose another document";
-        // A 503 is transient, and a 301 without a location never reaches a
-        // final response.
         for inconclusive in [503, 301] {
             let server = MockServer::start().await;
             let probes = Arc::new(AtomicUsize::new(0));
