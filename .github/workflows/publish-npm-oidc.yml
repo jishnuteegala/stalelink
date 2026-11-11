@@ -12,7 +12,13 @@ permissions:
   id-token: write
 
 jobs:
+  prerelease-gate:
+    uses: ./.github/workflows/prerelease-gate.yml
+    with:
+      plan: ${{ inputs.plan }}
   publish:
+    needs: prerelease-gate
+    if: needs.prerelease-gate.outputs.allowed == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -31,15 +37,25 @@ jobs:
           set -euo pipefail
           mkdir package
           tar -xzf artifacts/stalelink-npm-package.tar.gz -C package
-          test "$(node -p "require('./package/package/package.json').name")" = @jishnuteegala/stalelink
           cd package/package
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          test "$name" = @jishnuteegala/stalelink
+          if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+            message="$name@$version is already on npm, so npm publish was skipped."
+            echo "::notice::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           set +e
           npm publish --provenance 2>&1 | tee "$RUNNER_TEMP/npm-publish.log"
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -ne 0 ]; then
             if grep -q 'E404' "$RUNNER_TEMP/npm-publish.log"; then
-              echo "::warning::npm trusted publishing is not configured; continuing the release without publishing stalelink to npm. Complete the bootstrap before the next release."
+              message="npm trusted publishing is not configured, so stalelink was not published to npm. Complete the bootstrap, then re-run this job."
+              echo "::warning::$message"
+              echo "**Warning:** $message" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             exit "$status"

@@ -279,34 +279,19 @@ jobs:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
 
-  custom-publish-homebrew:
+  custom-verify-release-artifacts:
     needs:
       - plan
       - host
       - custom-create-draft-release
     if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    uses: ./.github/workflows/publish-homebrew.yml
+    uses: ./.github/workflows/verify-release-artifacts.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
     # publish jobs get escalated permissions
     permissions:
       "contents": "read"
-
-  custom-publish-npm-oidc:
-    needs:
-      - plan
-      - host
-      - custom-create-draft-release
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
-    uses: ./.github/workflows/publish-npm-oidc.yml
-    with:
-      plan: ${{ needs.plan.outputs.val }}
-    secrets: inherit
-    # publish jobs get escalated permissions
-    permissions:
-      "contents": "read"
-      "id-token": "write"
 
   custom-publish-nfpm:
     needs:
@@ -327,14 +312,13 @@ jobs:
     needs:
       - plan
       - host
-      - custom-publish-homebrew
-      - custom-publish-npm-oidc
+      - custom-verify-release-artifacts
       - custom-publish-nfpm
       - custom-create-draft-release
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.custom-publish-homebrew.result == 'skipped' || needs.custom-publish-homebrew.result == 'success') && (needs.custom-publish-npm-oidc.result == 'skipped' || needs.custom-publish-npm-oidc.result == 'success') && (needs.custom-publish-nfpm.result == 'skipped' || needs.custom-publish-nfpm.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.custom-verify-release-artifacts.result == 'skipped' || needs.custom-verify-release-artifacts.result == 'success') && (needs.custom-publish-nfpm.result == 'skipped' || needs.custom-publish-nfpm.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -363,6 +347,29 @@ jobs:
           gh release upload "${{ needs.plan.outputs.tag }}" artifacts/*
 
           gh release edit "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --draft=false
+
+  custom-publish-homebrew:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "read"
+
+  custom-publish-npm-oidc:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/publish-npm-oidc.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "read"
+      "id-token": "write"
 
   custom-publish-scoop:
     needs:

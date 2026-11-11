@@ -28,17 +28,23 @@ jobs:
         env:
           TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
         run: test -n "$TOKEN" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  prerelease-gate:
+    uses: ./.github/workflows/prerelease-gate.yml
+    with:
+      plan: ${{ inputs.plan }}
+      tag: ${{ inputs.tag }}
   publish:
-    needs: credentials
-    if: needs.credentials.outputs.available == 'true'
+    needs: [credentials, prerelease-gate]
+    if: needs.credentials.outputs.available == 'true' && needs.prerelease-gate.outputs.allowed == 'true'
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
       GH_TOKEN: ${{ secrets.PACKAGES_GITHUB_TOKEN }}
     steps:
+      # Deliberately checks out the workflow's own ref (not the release tag)
+      # so packaging-script fixes apply when re-publishing older tags.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
       - name: Generate and push manifest
         run: |
@@ -52,8 +58,5 @@ jobs:
           arm64_sha256="$(require_release_checksum sha256.sum "$arm64_asset")"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/jishnuteegala/scoop-bucket.git" bucket
           render_scoop_manifest bucket/stalelink.json "$version" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${x64_asset}" "$x64_sha256" "https://github.com/jishnuteegala/stalelink/releases/download/${TAG}/${arm64_asset}" "$arm64_sha256"
-          git -C bucket config user.name github-actions[bot]
-          git -C bucket config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C bucket add stalelink.json
-          git -C bucket commit -m "stalelink ${version}"
+          commit_channel_update bucket "stalelink ${version}" stalelink.json
           git -C bucket push

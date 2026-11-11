@@ -21,7 +21,7 @@ jobs:
       # No checkout step, so gh needs the repo set explicitly.
       GH_REPO: ${{ github.repository }}
     steps:
-      - name: Create the draft required by core publishers
+      - name: Create the draft that nFPM and announce upload into
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then

@@ -28,9 +28,14 @@ jobs:
         env:
           KEY: ${{ secrets.AUR_KEY }}
         run: test -n "$KEY" && echo 'available=true' >> "$GITHUB_OUTPUT" || echo 'available=false' >> "$GITHUB_OUTPUT"
+  prerelease-gate:
+    uses: ./.github/workflows/prerelease-gate.yml
+    with:
+      plan: ${{ inputs.plan }}
+      tag: ${{ inputs.tag }}
   publish:
-    needs: credentials
-    if: needs.credentials.outputs.available == 'true'
+    needs: [credentials, prerelease-gate]
+    if: needs.credentials.outputs.available == 'true' && needs.prerelease-gate.outputs.allowed == 'true'
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ inputs.tag || fromJson(inputs.plan).announcement_tag }}
@@ -57,8 +62,5 @@ jobs:
           git clone ssh://aur@aur.archlinux.org/stalelink-bin.git aur
           render_pkgbuild packaging/aur/PKGBUILD.template aur/PKGBUILD "$version" "$sha256"
           (cd aur && makepkg --printsrcinfo > .SRCINFO)
-          git -C aur config user.name github-actions[bot]
-          git -C aur config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C aur add PKGBUILD .SRCINFO
-          git -C aur commit -m "stalelink-bin ${version}"
+          commit_channel_update aur "stalelink-bin ${version}" PKGBUILD .SRCINFO
           git -C aur push
