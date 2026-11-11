@@ -98,7 +98,7 @@ figment = { version = "0.10", features = ["env"] }
 humantime = "2"
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "1"
-similar = "2.7"
+similar = "3.2"
 proptest = "1.6"
 tempfile = "3"
 html-escape = "0.2"
