@@ -196,7 +196,16 @@ fn validate(settings: &Settings) -> Result<(), String> {
             settings.auth.browser
         ));
     }
+    if let Some(agent) = &settings.network.user_agent
+        && !valid_user_agent(agent)
+    {
+        return Err(format!("invalid network.user-agent value: {agent:?}"));
+    }
     Ok(())
+}
+
+pub fn valid_user_agent(value: &str) -> bool {
+    reqwest::header::HeaderValue::from_str(value).is_ok()
 }
 
 fn apply_env(settings: &mut Settings) -> Result<(), String> {
@@ -377,12 +386,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(
             directory.path().join("stalelink.toml"),
-            "network = {\n  retries = 4,\n  user-agent = \"a\\eb\",\n}\n",
+            "network = {\n  retries = 4,\n  user-agent = \"a\\x41b\",\n}\n",
         )
         .unwrap();
         let settings = resolve(directory.path()).unwrap();
         assert_eq!(settings.network.retries, 4);
-        assert_eq!(settings.network.user_agent.as_deref(), Some("a\u{1b}b"));
+        assert_eq!(settings.network.user_agent.as_deref(), Some("aAb"));
     }
 
     #[test]

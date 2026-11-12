@@ -259,6 +259,67 @@ fn invalid_auth_environment_is_a_usage_error() {
         .stderr(predicate::str::contains("invalid auth.browser"));
 }
 
+#[tokio::test]
+async fn invalid_user_agent_config_is_a_usage_error_before_any_request() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("stalelink.toml"),
+        "[network]\nuser-agent = \"bad\\nagent\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("note.txt"),
+        format!("{}/ok", server.uri()),
+    )
+    .unwrap();
+    util::command()
+        .args(["scan", "--no-cache", directory.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "invalid network.user-agent value: \"bad\\nagent\"",
+        ));
+}
+
+#[test]
+fn invalid_user_agent_flag_is_a_usage_error() {
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    util::command()
+        .args([
+            "scan",
+            "--no-cache",
+            "--user-agent",
+            "bad\nagent",
+            file.path().to_str().unwrap(),
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("not a valid HTTP header value"));
+}
+
+#[tokio::test]
+async fn configured_user_agent_is_sent_unchanged() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::header("user-agent", "custom/1.0"))
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    std::fs::write(file.path(), format!("{}/ok", server.uri())).unwrap();
+    util::command()
+        .env("STALELINK_NETWORK_USER_AGENT", "custom/1.0")
+        .args(["scan", "--no-cache", file.path().to_str().unwrap()])
+        .assert()
+        .success();
+}
+
 #[test]
 fn cache_commands_use_toml_directory_from_current_directory() {
     let directory = tempfile::tempdir().unwrap();
