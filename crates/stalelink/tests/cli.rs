@@ -300,7 +300,24 @@ fn invalid_user_agent_flag_is_a_usage_error() {
         ])
         .assert()
         .code(2)
-        .stderr(predicate::str::contains("--user-agent"));
+        .stderr(predicate::str::contains("not a valid HTTP header value"));
+}
+
+#[tokio::test]
+async fn configured_user_agent_is_sent_unchanged() {
+    let server = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::header("user-agent", "custom/1.0"))
+        .respond_with(wiremock::ResponseTemplate::new(200))
+        .expect(1..)
+        .mount(&server)
+        .await;
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    std::fs::write(file.path(), format!("{}/ok", server.uri())).unwrap();
+    util::command()
+        .env("STALELINK_NETWORK_USER_AGENT", "custom/1.0")
+        .args(["scan", "--no-cache", file.path().to_str().unwrap()])
+        .assert()
+        .success();
 }
 
 #[test]
