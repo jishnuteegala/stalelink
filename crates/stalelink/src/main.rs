@@ -157,7 +157,7 @@ struct NetworkArgs {
     #[arg(long)]
     retries: Option<u8>,
     /// Custom User-Agent header
-    #[arg(long)]
+    #[arg(long, value_parser = user_agent)]
     user_agent: Option<String>,
     /// Cache entry validity window (e.g. 30m, 12h, 7d)
     #[arg(long)]
@@ -396,6 +396,14 @@ fn run_scan(args: ScanArgs, quiet: bool, verbose: u8) -> ExitCode {
         return ExitCode::from(ENVIRONMENT);
     }
     ExitCode::from(exit_code)
+}
+
+fn user_agent(value: &str) -> Result<String, &'static str> {
+    if config::valid_user_agent(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("not a valid HTTP header value")
+    }
 }
 
 fn tier3_unavailable(requested_auth: Option<Auth>) -> Result<(), u8> {
