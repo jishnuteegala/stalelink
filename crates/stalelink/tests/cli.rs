@@ -289,8 +289,15 @@ async fn invalid_user_agent_config_is_a_usage_error_before_any_request() {
 
 #[test]
 fn invalid_user_agent_flag_is_a_usage_error() {
+    let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
     util::command()
-        .args(["scan", "--user-agent", "bad\nagent", "x.md"])
+        .args([
+            "scan",
+            "--no-cache",
+            "--user-agent",
+            "bad\nagent",
+            file.path().to_str().unwrap(),
+        ])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("--user-agent"));
