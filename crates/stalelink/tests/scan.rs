@@ -455,7 +455,9 @@ async fn cache_stats_record_a_repeat_scan_hit() {
         .args(["cache", "stats"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("hits: 1").and(predicate::str::contains("misses: 1")));
+        .stdout(predicate::str::starts_with(
+            "hits: 1\nmisses: 1\nentries: 1\n",
+        ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
