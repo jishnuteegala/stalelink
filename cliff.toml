@@ -1,6 +1,7 @@
 [changelog]
 header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n"
 body = """
+## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% for group, commits in commits | group_by(attribute=\"group\") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}
@@ -13,24 +14,20 @@ render_always = true
 
 [git]
 conventional_commits = true
-filter_unconventional = false
+# A squash body can list extra Conventional Commits, one per line. Splitting
+# before parsing keeps them even when the subject's type is skipped.
+split_commits = true
+processing_order = ["commit_preprocessors", "split_commits", "conventional_commits", "commit_parsers", "link_parsers"]
 # Only real release tags delimit versions; any future non-semver tag (nightly,
 # markers) must not become a changelog range boundary.
 tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
 commit_parsers = [
-  { message = "^chore\\(release\\)", skip = true },
-  { message = "^chore: release", skip = true },
-  { message = "^chore\\(deps\\)", skip = true },
-  { message = "^Bump ", skip = true },
-  { message = "^T[0-9]+:", group = "Features" },
-  { message = "^feat", group = "Features" },
-  { message = "^fix", group = "Bug Fixes" },
-  { message = "^perf", group = "Performance" },
-  { message = "^docs", skip = true },
-  { message = "^test", skip = true },
-  { message = "^chore", skip = true },
-  { message = "^ci", skip = true },
-  { message = "^style", skip = true },
-  { message = "^refactor", skip = true },
-  { message = "^.*", group = "Other" },
+  { message = "^feat(\\([^)]*\\))?!?: ", group = "Features" },
+  { message = "^fix(\\([^)]*\\))?!?: ", group = "Bug Fixes" },
+  { message = "^perf(\\([^)]*\\))?!?: ", group = "Performance" },
+  { message = "^build(\\([^)]*\\))?!?: ", group = "Build System" },
+  { message = "^revert(\\([^)]*\\))?!?: ", group = "Reverts" },
+  # Every other line: hidden types (chore, ci, docs, refactor, style, test),
+  # Dependabot "Bump" subjects, and PR-body prose.
+  { message = ".*", skip = true },
 ]
