@@ -2,6 +2,8 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0] - 2026-08-07
+
 ### Features
 
 - Scaffold workspace, core model, CLI skeleton, and CI ([#26](https://github.com/jishnuteegala/stalelink/pull/26))
