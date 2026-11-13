@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-11-13
+
+### Features
+
+- Accept TOML 1.1 syntax in stalelink.toml
+
+
+### Bug Fixes
+
+- Align user-facing surfaces and release docs with shipped state ([#78](https://github.com/jishnuteegala/stalelink/pull/78))
+
+- Upgrade zip, lopdf, rustls and wrangler to clear security alerts ([#89](https://github.com/jishnuteegala/stalelink/pull/89))
+
+- Refuse PDFs that open with an empty user password
+
+- Move off yanked chacha20 0.10.1 and async-executor 1.14.0
+
+- Decode character references and predefined entities in field instructions
+
+
+### Performance
+
+- Share one soft-404 sibling probe per directory ([#101](https://github.com/jishnuteegala/stalelink/pull/101))
+
+- Reuse the GET fallback walk in heuristics
+
+- Buffer report writes
+
+
+### Build System
+
+- Upgrade quick-xml to 0.42 and toml to 1.2 ([#90](https://github.com/jishnuteegala/stalelink/pull/90))
+
+
 ## [0.1.0] - 2026-08-07
 
 ### Features
