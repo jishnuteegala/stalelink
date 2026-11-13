@@ -14,6 +14,9 @@ publish = true
 [[package]]
 name = "stalelink"
 changelog_update = true
+# For a v* tag, cargo-dist reads the GitHub Release notes only from a
+# CHANGELOG file in the workspace root.
+changelog_path = "CHANGELOG.md"
 git_tag_enable = true
 # One product tag (not the stalelink-v* package default): it must match
 # cliff.toml's tag_pattern and the release workflow's tag trigger.
