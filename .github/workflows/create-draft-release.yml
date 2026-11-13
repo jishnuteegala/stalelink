@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ fromJson(inputs.plan).announcement_tag }}
-      TITLE: ${{ fromJson(inputs.plan).announcement_title }}
       BODY: ${{ fromJson(inputs.plan).announcement_github_body }}
       GH_TOKEN: ${{ github.token }}
       # No checkout step, so gh needs the repo set explicitly.
@@ -30,5 +29,5 @@ jobs:
             echo "release $TAG already exists (draft: $(gh release view "$TAG" --json isDraft --jq .isDraft))"
           else
             printf '%s\n' "$BODY" > notes.md
-            gh release create "$TAG" --draft --title "$TITLE" --notes-file notes.md
+            gh release create "$TAG" --draft --title "$TAG" --notes-file notes.md
           fi
