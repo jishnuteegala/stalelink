@@ -1,6 +1,7 @@
 [changelog]
 header = "# Changelog\n\nAll notable changes to this project will be documented in this file.\n"
 body = """
+
 ## [{{ version }}] - {{ timestamp | date(format="%Y-%m-%d") }}
 {% for group, commits in commits | group_by(attribute=\"group\") %}
 ### {{ group | striptags | trim | upper_first }}
@@ -22,11 +23,12 @@ processing_order = ["commit_preprocessors", "split_commits", "conventional_commi
 # markers) must not become a changelog range boundary.
 tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
 commit_parsers = [
-  { message = "^feat(\\([^)]*\\))?!?: ", group = "Features" },
-  { message = "^fix(\\([^)]*\\))?!?: ", group = "Bug Fixes" },
-  { message = "^perf(\\([^)]*\\))?!?: ", group = "Performance" },
-  { message = "^build(\\([^)]*\\))?!?: ", group = "Build System" },
-  { message = "^revert(\\([^)]*\\))?!?: ", group = "Reverts" },
+  # The HTML comments order the sections; the template strips them.
+  { message = "^feat(\\([^)]*\\))?!?: ", group = "<!-- 0 -->Features" },
+  { message = "^fix(\\([^)]*\\))?!?: ", group = "<!-- 1 -->Bug Fixes" },
+  { message = "^perf(\\([^)]*\\))?!?: ", group = "<!-- 2 -->Performance" },
+  { message = "^revert(\\([^)]*\\))?!?: ", group = "<!-- 3 -->Reverts" },
+  { message = "^build(\\([^)]*\\))?!?: ", group = "<!-- 4 -->Build System" },
   # Every other line: hidden types (chore, ci, docs, refactor, style, test),
   # Dependabot "Bump" subjects, and PR-body prose.
   { message = ".*", skip = true },
