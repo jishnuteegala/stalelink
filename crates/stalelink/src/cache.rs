@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use stalelink_core::{
     check::{CheckFuture, Checker},
     model::{Confidence, Verdict},
@@ -53,7 +53,7 @@ impl VerdictCache {
     }
 
     fn open_connection(path: &Path) -> Result<Connection, String> {
-        let connection =
+        let mut connection =
             Connection::open(path).map_err(|error| format!("opening cache: {error}"))?;
         // Wait out cross-process contention instead of surfacing SQLITE_BUSY.
         connection
@@ -62,15 +62,20 @@ impl VerdictCache {
         connection
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| error.to_string())?;
-        let version: i32 = connection
+        // Holding the write lock from the version check to the version update stops a
+        // process that saw the old version from dropping tables another one just created.
+        let schema = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let version: i32 = schema
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .map_err(|error| error.to_string())?;
         if version != SCHEMA_VERSION {
-            connection
+            schema
                 .execute_batch("DROP TABLE IF EXISTS verdicts; DROP TABLE IF EXISTS cache_stats;")
                 .map_err(|error| error.to_string())?;
         }
-        connection
+        schema
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS verdicts (
                 url TEXT PRIMARY KEY NOT NULL,
@@ -86,9 +91,10 @@ impl VerdictCache {
             INSERT OR IGNORE INTO cache_stats (singleton) VALUES (1);",
             )
             .map_err(|error| error.to_string())?;
-        connection
+        schema
             .pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|error| error.to_string())?;
+        schema.commit().map_err(|error| error.to_string())?;
         Ok(connection)
     }
 
@@ -358,5 +364,33 @@ mod tests {
         let url: Url = "https://example.test/private".parse().unwrap();
         cache.put(&url, &None, 2).unwrap();
         assert_eq!(cache.get(&url, Duration::from_secs(60), 1).unwrap(), None);
+    }
+
+    #[test]
+    fn opening_waits_for_another_schema_setup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let cache = VerdictCache::open(path.clone()).unwrap();
+        cache
+            .put(&"https://example.test/".parse().unwrap(), &None, 1)
+            .unwrap();
+        drop(cache);
+        let mut first = Connection::open(&path).unwrap();
+        first.pragma_update(None, "user_version", 0).unwrap();
+        let setup = first
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let opener = std::thread::spawn({
+            let path = path.clone();
+            move || VerdictCache::open(path)
+        });
+        // Gives the opener time to read the not yet updated version; if it is
+        // slower, the test passes vacuously rather than failing.
+        std::thread::sleep(Duration::from_millis(200));
+        setup
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        setup.commit().unwrap();
+        assert_eq!(opener.join().unwrap().unwrap().stats().unwrap().entries, 1);
     }
 }
