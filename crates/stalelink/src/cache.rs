@@ -365,4 +365,32 @@ mod tests {
         cache.put(&url, &None, 2).unwrap();
         assert_eq!(cache.get(&url, Duration::from_secs(60), 1).unwrap(), None);
     }
+
+    #[test]
+    fn opening_waits_for_another_schema_setup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let cache = VerdictCache::open(path.clone()).unwrap();
+        cache
+            .put(&"https://example.test/".parse().unwrap(), &None, 1)
+            .unwrap();
+        drop(cache);
+        let mut first = Connection::open(&path).unwrap();
+        first.pragma_update(None, "user_version", 0).unwrap();
+        let setup = first
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let opener = std::thread::spawn({
+            let path = path.clone();
+            move || VerdictCache::open(path)
+        });
+        // Gives the opener time to read the not yet updated version; if it is
+        // slower, the test passes vacuously rather than failing.
+        std::thread::sleep(Duration::from_millis(200));
+        setup
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        setup.commit().unwrap();
+        assert_eq!(opener.join().unwrap().unwrap().stats().unwrap().entries, 1);
+    }
 }
