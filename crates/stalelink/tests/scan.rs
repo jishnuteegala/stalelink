@@ -2,7 +2,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Condvar, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use predicates::prelude::*;
@@ -428,11 +428,7 @@ async fn no_local_suppresses_local_and_contact_findings() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_stats_record_a_repeat_scan_hit() {
-    let server = MockServer::start().await;
-    Mock::given(path("/missing"))
-        .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(700)))
-        .mount(&server)
-        .await;
+    let server = serve(&[("/missing", 404)]).await;
     let directory = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -440,7 +436,7 @@ async fn cache_stats_record_a_repeat_scan_hit() {
         format!("{}/missing\n", server.uri()),
     )
     .unwrap();
-    let mut elapsed = Vec::new();
+    let mut requests = Vec::new();
     for _ in 0..2 {
         let mut command = util::command();
         command.env("STALELINK_CACHE_DIR", cache.path()).args([
@@ -449,12 +445,10 @@ async fn cache_stats_record_a_repeat_scan_hit() {
             "0",
             directory.path().to_str().unwrap(),
         ]);
-        let started = Instant::now();
         tokio::task::block_in_place(|| command.assert()).code(1);
-        elapsed.push(started.elapsed());
+        requests.push(server.received_requests().await.unwrap().len());
     }
-    assert!(elapsed[1] + Duration::from_millis(250) < elapsed[0]);
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(requests, [1, 1]);
     let mut stats = util::command();
     stats
         .env("STALELINK_CACHE_DIR", cache.path())
