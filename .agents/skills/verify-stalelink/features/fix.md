@@ -46,8 +46,11 @@ Preconditions:
   `/ok`, a `.bak` sibling exists; copy the result to
   `evidence/fixture.after`.
 - **Read-only confirm.** Run `stalelink scan --no-cache scratch/fix` again;
-  the redirect finding is gone and a plain `curl`-style check of `/ok` stays
-  clean.
+  the redirect finding is gone from the rewritten file but the `.bak`
+  sibling now carries the same `PermanentRedirect` row (per the
+  backup-rescan gotcha below), so the directory rescan still exits 1 -
+  assert the only remaining row's SOURCE is the `.bak`, and that a plain
+  `curl`-style check of `/ok` stays clean.
 - **Copy mode.** On a fresh fixture, run `stalelink fix --no-cache --copy
   --min-fix-confidence outdated scratch/fix2`. The original is untouched and
   a `*.fixed.*` file holds the rewrite.
@@ -64,10 +67,19 @@ Preconditions:
   signed, direct-annotation, unparseable PDFs) and the per-file fixer (e.g.
   bare PDF text URLs, non-semantic source bytes, OOXML archive/link-part
   errors, conflicts, unpreservable ZIP metadata).
-- The written target is re-verified after a write (`fix-verify`), so a second
-  scan is the honest confirmation that a rewrite stuck.
+- `fix` exits 1 only when it refuses work (`refused` or `failed <path>:`
+  lines); findings or fixes alone never make it nonzero, so a preview that
+  shows a diff still exits 0.
+- `fix-verify` re-extracts links from the written bytes and checks the
+  replacement is present and the old URL gone - it does not re-probe the
+  URL over HTTP; a second scan is the honest confirmation that a rewrite
+  stuck.
+- `--backup` requires `--write` and conflicts `--copy`; either violation is
+  a clap usage error (exit 2).
 - `--copy` is a write mode, not a preview modifier: `stalelink fix --copy
-  <path>` creates `*.fixed.*` files with no `--write`, and clap rejects
-  `--write --copy` together (exit 2).
+  <path>` creates `*.fixed.*` files with no `--write`, clap rejects
+  `--write --copy` together (exit 2), and re-running `--copy` on a fixture
+  whose `*.fixed.*` already exists exits 1 with `refusing to overwrite
+  existing fixed copy`.
 - Backup files (`*.bak`) inside the scanned tree get re-scanned; keep
   evidence copies outside `scratch/`.

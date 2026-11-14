@@ -60,9 +60,10 @@ the build or checkout is broken; do not drive.
 - Pass `--no-cache` on drives that do not test caching, and `STALELINK_CACHE_DIR`
   on ones that do.
 - Capture each invocation's stdout, stderr, and exit code as it happens; exit
-  codes are part of the contract: 0 clean (or all fixes applied), 1 findings
-  reported or fix work refused/failed, 2 usage error, 3 environment/execution
-  failure.
+  codes are part of the contract: 0 clean (or all fixes applied), 1 any
+  finding at or above the effective fail-on threshold on `scan` or any
+  `refused`/`failed` line on `fix` (a preview that shows a diff still exits
+  0), 2 usage error, 3 environment/execution failure.
 
 ## Evidence
 
@@ -82,7 +83,10 @@ the build or checkout is broken; do not drive.
 ## Cleanup
 
 - Stop the scratch HTTP server if one was started (record its PID at launch;
-  on Windows use `Stop-Process -Id <pid>`; elsewhere `kill <pid>`).
+  on Windows use `Stop-Process -Id <pid>`; elsewhere `kill <pid>`). The `$!`
+  captured in msys/Git Bash is the msys PID - resolve the Windows PID for
+  `Stop-Process` via the owning process of the bound port, or `kill $!` from
+  the same bash session.
 - Remove `$RUN_DIR/scratch/` only. Never delete `$RUN_DIR/evidence/`.
 - Do not kill processes by name; a correctly launched run owns exactly one
   optional helper PID.
