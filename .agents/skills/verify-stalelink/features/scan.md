@@ -45,8 +45,8 @@ Preconditions:
   scratch/docs > evidence/scan.json`. The file parses as JSON with the
   document and findings shape from `schema/stalelink-report.v1.json`.
 - **SARIF artifact.** Run `stalelink scan --no-cache --format sarif -o
-  scratch/out.sarif scratch/docs`. `out.sarif` exists on disk and is valid
-  SARIF (`version: "2.1.0"`).
+  evidence/out.sarif scratch/docs` (not `scratch/`, which Cleanup deletes).
+  `out.sarif` exists on disk and is valid SARIF (`version: "2.1.0"`).
 - **Fail threshold.** Run with `--fail-on dead-certain` on a fixture whose
   only finding is below `dead-certain` - e.g. a redirect link producing an
   `OUTDATED` `PermanentRedirect` row; exit code is 0 despite findings.
@@ -61,6 +61,27 @@ Preconditions:
 - `--auth` tiers above `off` touch real browser state, and the configured
   default is `cookies` - drives that must stay offline must pass `--auth off`
   explicitly and treat browser tiers as untested.
+- The fail-on threshold compares by rank, not declaration order:
+  `dead-certain > likely-dead > outdated > auth-walled > suspect`, so
+  `--fail-on outdated` still passes auth-walled findings (rank 2 < 3) -
+  the enum lists `AuthWalled` before `Outdated`, which is the trap.
 - stdout carries findings while stderr carries progress/diagnostics; `-q`
   suppresses progress but notices/warnings/errors still print to stderr -
-  the nothing-on-either-stream case is `-q` + `-o` on a diagnostic-free run.
+  the nothing-on-either-stream case is `-q` + `-o` on a diagnostic-free
+  run. A fully clean table-format scan prints nothing on stdout even
+  without `-q`/`-o` (json and sarif still emit their documents).
+- The table's REASON column shows the Debug variant (`LocalMissing`,
+  `PermanentRedirect`) except `HttpStatus`, which renders `HTTP <status>`;
+  the human-readable detail (`anchor not found: #x`) is JSON-only - assert
+  on URL + variant name or HTTP status, not the prose.
+- The directory walk honors `.gitignore`, `.ignore` and global git excludes;
+  an unexpectedly empty corpus inside a repository usually means ignore
+  rules, not clean documents.
+- `stalelink.toml` discovery for `scan`/`fix` walks up from the first scan
+  path (an ancestor toml under TMPDIR can inject `output.fail-on` or
+  `cache.dir`), while `cache stats`/`cache clear` resolve config from cwd;
+  drives that must stay config-free should point `STALELINK_CACHE_DIR` and
+  check for ancestor tomls.
+- `--auth browser` on the default build (no `live-browser` feature) prints
+  a warning and exits 3; `--min-confidence` filters display only and never
+  gates the exit code.

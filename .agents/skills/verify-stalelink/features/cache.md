@@ -35,13 +35,18 @@ Preconditions:
   the observable proof is `cache stats`: `hits` climbs while `entries` and
   `misses` stay flat between the two scans.
 - **Clear.** Run `stalelink cache clear`, then `stalelink cache stats`.
-  Stats reports an empty cache; a third scan re-probes the server.
+  Stats reports `entries: 0` with `hits: 0` and `misses: 0`; `size` stays
+  nonzero because stats re-creates the empty database - assert on the
+  counters, not size. A third scan re-probes the server.
 
 ## Gotchas
 
-- Forgetting `STALELINK_CACHE_DIR` makes `stats`/`clear` operate on the real
-  platform cache (or the `cache.dir` from a `stalelink.toml` discovered
-  upward from cwd, which claims it first); set it before any cache drive.
+- Forgetting `STALELINK_CACHE_DIR` makes `stats`/`clear` operate on a cache
+  chosen by precedence `STALELINK_CACHE_DIR` > `cache.dir` from a
+  `stalelink.toml` discovered upward from cwd > the real platform cache;
+  set it before any cache drive.
+- The default TTL is 24h; `--cache-ttl` takes humantime strings (`30m`,
+  `12h`, `7d`) and an invalid value is a usage error (exit 2).
 - `--no-cache` bypasses both read and write, so a drive launched with it
   never populates the cache even when the cache feature itself is under test.
 - `--refresh` ignores reads but still writes; it is not a substitute for a
