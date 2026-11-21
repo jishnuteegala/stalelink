@@ -7,7 +7,7 @@ copies (`--copy`).
 
 ## Sub-features
 
-- `fix-preview` prints a diff (colored only on a terminal) of proposed
+- `fix-preview` prints a diff (colored on a terminal by default) of proposed
   rewrites for text formats - binary formats print one
   `path: url -> replacement` summary line per finding - and changes
   nothing.
