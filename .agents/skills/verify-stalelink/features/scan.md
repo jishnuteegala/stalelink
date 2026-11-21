@@ -72,7 +72,8 @@ Preconditions:
   without `-q`/`-o` (json and sarif still emit their documents).
 - The table's REASON column shows the Debug variant (`LocalMissing`,
   `PermanentRedirect`) except `HttpStatus`, which renders `HTTP <status>`;
-  the human-readable detail (`anchor not found: #x`) is JSON-only - assert
+  the human-readable detail (`anchor not found: #x`) is machine-formats-only
+  (JSON `evidence` and SARIF result `properties.evidence`) - assert
   on URL + variant name or HTTP status, not the prose.
 - The directory walk honors `.gitignore`, `.ignore` and global git excludes;
   an unexpectedly empty corpus inside a repository usually means ignore

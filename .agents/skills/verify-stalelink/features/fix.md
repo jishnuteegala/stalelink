@@ -7,8 +7,13 @@ copies (`--copy`).
 
 ## Sub-features
 
-- `fix-preview` prints a colored diff of proposed rewrites and changes
+- `fix-preview` prints a diff (colored only on a terminal) of proposed
+  rewrites for text formats - binary formats print one
+  `path: url -> replacement` summary line per finding - and changes
   nothing.
+- `fix-exclude` filters fix classes with
+  `--fix-exclude {pdf,redirect,url-upgrade}`; excluded classes produce no
+  proposed rewrites.
 - `fix-write` applies rewrites at or above `--min-fix-confidence` to the
   source files.
 - `fix-backup` leaves a `<name>.<ext>.bak` sibling alongside a written file
